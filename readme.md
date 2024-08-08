@@ -9,6 +9,7 @@ This [paper](https://arxiv.org/pdf/2405.06323) develops a new algorithm for the 
 By joining manual damage annotations from UNOSAT with building footprints, 700,488 labeled building footprints spread across 12 cities in 4 different conflict zones are used for validation.The dataset can be downloaded [here](https://drive.google.com/file/d/1AjsCJ5Wc0xDRUcc0VHtATLWee2lVN8RM/view?usp=sharing).
 
 <h3 align="center">Validation Dataset</h3>
+
 | Country   | City        | Footprints | Percent Damaged | Annotation Date |
 |-----------|-------------|-------------|-----------------|-----------------|
 | Palestine | Gaza        | 220160      | 57.21%          | 2024-05-03      |
@@ -26,4 +27,7 @@ By joining manual damage annotations from UNOSAT with building footprints, 700,4
 
 
 ## Quickstart
+
+git clone https://github.com/oballinger/PWTT
+cd code
 
