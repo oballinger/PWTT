@@ -20,6 +20,40 @@ ul.task-list li input[type="checkbox"] {
   margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
   vertical-align: middle;
 }
+/* CSS for syntax highlighting */
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
 </style>
 
 
@@ -34,6 +68,8 @@ ul.task-list li input[type="checkbox"] {
 <link href="readme_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
 <link href="readme_files/libs/bootstrap/bootstrap.min.css" rel="stylesheet" id="quarto-bootstrap" data-mode="light">
 
+  <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js" type="text/javascript"></script>
 
 </head>
 
@@ -45,17 +81,59 @@ ul.task-list li input[type="checkbox"] {
 
 
 
-<section id="pixel-wise-t-test" class="level1">
-<h1>Pixel-Wise T-Test</h1>
-<section id="a-new-algorithm-for-battle-damage-detection-using-sentinel-1-imagery" class="level2">
-<h2 class="anchored" data-anchor-id="a-new-algorithm-for-battle-damage-detection-using-sentinel-1-imagery">A new algorithm for battle damage detection using Sentinel-1 imagery</h2>
-<p>This <a href="https://arxiv.org/pdf/2405.06323">paper</a> develops a new algorithm for the detection of urban conflict damage– the Pixelwise T-Test (PWTT)– that is lightweight, unsupervised, and uses only freely-available Synthetic Aperture Radar (SAR) imagery.</p>
+<h1 align="center">
+Pixel-Wise T-Test
+</h1>
+<h2 align="center" class="anchored">
+A New Algorithm for Battle Damage Detection using Sentinel-1 Imagery
+</h2>
+<p align="center">
+<a href="https://arxiv.org/pdf/2405.06323"><img src="https://img.shields.io/badge/arXiv-paper-b31b1b.svg" class="img-fluid"></a> <a href="https://colab.research.google.com/github/oballinger/PWTT/blob/main/pwtt_quickstart.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" class="img-fluid"></a> <a href="https://drive.google.com/file/d/1AjsCJ5Wc0xDRUcc0VHtATLWee2lVN8RM/view?usp=sharing"><img src="https://img.shields.io/badge/Benchmark%20Dataset-8A2BE2.png" class="img-fluid"></a>
+</p>
+<p><img src="figs/pwtt_pre_post.png" class="img-fluid"></p>
+<p>The generation of public information regarding buildings damaged by conflict has become particularly important in the context of recent, highly destructive wars in Gaza and Ukraine. This paper develops the Pixelwise T-Test (PWTT), a new algorithm for open-access battle damage estimation that is accurate, lightweight, and generalizable. The PWTT addresses many of the problems associated with expense, coverage consistency, and domain shift that affect deep-learning based approaches to building damage detection, and outperforms the state of the art deep learning model on unseen areas.</p>
+<section id="how-it-works" class="level2">
+<h2 class="anchored" data-anchor-id="how-it-works">How it Works</h2>
+<p>The PWTT utilizes Synthetic Aperture Radar imagery from the Sentinel-1 satellite. The figure below demonstrates the change in backscatter amplitude (i.e., the “loudness” of the signal’s echo) for a destroyed building in Mariupol, Ukraine, before and after its destruction. The corresponding Sentinel-1 pixel has a low standard deviation in both the pre-and post-war periods, but experiences a large change in mean amplitude. The T-Test is a simple signal-to-noise ratio that measures the difference between the means of two samples adjusted by the standard deviation within each sample.</p>
+<p><img src="figs/single_building.png" class="img-fluid"></p>
+<p>The green dashed line and shaded area represent the pixel’s mean backscatter amplitude <span class="math inline">\(\pm\)</span> 1 standard deviation prior to the invasion, while the red line and shaded area represent these statistics following the building’s destruction.</p>
+</section>
+<section id="python-quickstart" class="level2">
+<h2 class="anchored" data-anchor-id="python-quickstart">Python Quickstart <a href="https://colab.research.google.com/github/oballinger/PWTT/blob/main/pwtt_quickstart.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" class="img-fluid"></a></h2>
+<p>First, clone the repository and navigate to the code directory</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="op">!</span>git clone https:<span class="op">//</span>github.com<span class="op">/</span>oballinger<span class="op">/</span>PWTT</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="op">!</span>cd PWTT<span class="op">/</span>code</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>Then, import the Google Earth Engine python API and authenticate using your credentials and cloud project name.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> ee</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pwtt</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>project_name<span class="op">=</span><span class="st">'&lt;YOUR PROJECT NAME&gt;'</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>ee.Authenticate()</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>ee.Initialize(project<span class="op">=</span>project_name)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>finally, the PWTT can be deployed in one line of code. The example below conducts a damage assessment over Gaza for July 2024.</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>gaza <span class="op">=</span> ee.Geometry.Rectangle([<span class="fl">34.21</span>,<span class="fl">31.21</span>,<span class="fl">34.57</span>,<span class="fl">31.60</span>])</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>pwtt.filter_s1(aoi<span class="op">=</span>gaza, <span class="co"># the area of interest as a bounding box</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>                   war_start<span class="op">=</span><span class="st">'2023-10-10'</span>, <span class="co"># the start of the war</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>                   inference_start<span class="op">=</span><span class="st">'2024-07-01'</span>, <span class="co"># the beginning of the inference window</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>                   pre_interval<span class="op">=</span><span class="dv">12</span>, <span class="co"># the number of months before the war to use as a reference period </span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>                   post_interval<span class="op">=</span><span class="dv">1</span>, <span class="co"># the number of months after the war to use as an inference period </span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>                   viz<span class="op">=</span><span class="va">True</span>) <span class="co"># visualize the results</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>By simply modifying the location, war_start date and inference_start dates, damage assessment can be carried out on a new area; below is another example for Bakhmut, Ukraine:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>bakhmut <span class="op">=</span> ee.Geometry.Rectangle([<span class="fl">37.949421</span>, <span class="fl">48.556181</span>, <span class="fl">38.043834</span>, <span class="fl">48.621584</span>])</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>pwtt.filter_s1(aoi<span class="op">=</span>bakhmut,</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>                   war_start<span class="op">=</span><span class="st">'2022-02-22'</span>,</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>                   inference_start<span class="op">=</span><span class="st">'2024-07-01'</span>,</span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>                   pre_interval<span class="op">=</span><span class="dv">12</span>,</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>                   post_interval<span class="op">=</span><span class="dv">1</span>,</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>                   viz<span class="op">=</span><span class="va">True</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </section>
 <section id="validation-data" class="level2">
 <h2 class="anchored" data-anchor-id="validation-data">Validation Data</h2>
-<p>By joining manual damage annotations from UNOSAT with building footprints, 700,488 labeled building footprints spread across 12 cities in 4 different conflict zones are used for validation.The dataset can be downloaded <a href="https://drive.google.com/file/d/1AjsCJ5Wc0xDRUcc0VHtATLWee2lVN8RM/view?usp=sharing">here</a>.</p>
+<p>Accuracy assessments are carried out using an original dataset of 700,500 annotated building footprints, spanning 12 cities in four different countries. This dataset was compiled by spatially joining damage annotations from the United Nations Satellite Centre (UNOSAT) with data on building footprints. The dataset can be downloaded <a href="https://drive.google.com/file/d/1AjsCJ5Wc0xDRUcc0VHtATLWee2lVN8RM/view?usp=sharing">here</a>.</p>
 <h3 align="center" class="anchored">
-Validation Dataset
+Benchmark Dataset
 </h3>
 <table class="table">
 <colgroup>
@@ -161,10 +239,130 @@ Validation Dataset
 </tr>
 </tbody>
 </table>
+<p>Building footprint data is sourced from the Microsoft Building Footprints dataset, which consists of over 1 billion building footprints derived from high resolution satellite imagery around the world. A building footprint is labeled as damaged if it intersects with a UNOSAT damage annotation point, and labeled undamaged otherwise. UNOSAT annotations are generated manually on the basis of high resolution optical satellite imagery.</p>
 </section>
-<section id="quickstart" class="level2">
-<h2 class="anchored" data-anchor-id="quickstart">Quickstart</h2>
-</section>
+<section id="accuracy-assessment" class="level2">
+<h2 class="anchored" data-anchor-id="accuracy-assessment">Accuracy Assessment</h2>
+<p>The table below reports the accuracy statistics for the PWTT algorithm in 12 cities, assessed using the benchmark dataset above.</p>
+<table class="table">
+<thead>
+<tr class="header">
+<th>City</th>
+<th>AUC</th>
+<th>F1</th>
+<th>Precision</th>
+<th>Recall</th>
+<th>N</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Gaza</td>
+<td>83.13</td>
+<td>78.72</td>
+<td>71.68</td>
+<td>87.3</td>
+<td>220160</td>
+</tr>
+<tr class="even">
+<td>Lysychansk</td>
+<td>77.5</td>
+<td>52.47</td>
+<td>46.24</td>
+<td>60.64</td>
+<td>22280</td>
+</tr>
+<tr class="odd">
+<td>S’odonetsk</td>
+<td>69.36</td>
+<td>64.98</td>
+<td>50.28</td>
+<td>91.84</td>
+<td>7085</td>
+</tr>
+<tr class="even">
+<td>Rubizhne</td>
+<td>77.72</td>
+<td>67.5</td>
+<td>68.55</td>
+<td>66.48</td>
+<td>9905</td>
+</tr>
+<tr class="odd">
+<td>Kharkiv</td>
+<td>78.66</td>
+<td>27.72</td>
+<td>25.03</td>
+<td>31.06</td>
+<td>122590</td>
+</tr>
+<tr class="even">
+<td>Mariupol</td>
+<td>70.48</td>
+<td>71.58</td>
+<td>61.38</td>
+<td>85.84</td>
+<td>20481</td>
+</tr>
+<tr class="odd">
+<td>Irpin</td>
+<td>83.94</td>
+<td>59.41</td>
+<td>54.53</td>
+<td>65.24</td>
+<td>7917</td>
+</tr>
+<tr class="even">
+<td>Hostomel</td>
+<td>86.25</td>
+<td>73.49</td>
+<td>67.66</td>
+<td>80.41</td>
+<td>4728</td>
+</tr>
+<tr class="odd">
+<td>Chernihiv</td>
+<td>84.65</td>
+<td>46.92</td>
+<td>53.07</td>
+<td>42.05</td>
+<td>33733</td>
+</tr>
+<tr class="even">
+<td>Raqqa</td>
+<td>76.38</td>
+<td>75.22</td>
+<td>66.27</td>
+<td>86.95</td>
+<td>26728</td>
+</tr>
+<tr class="odd">
+<td>Mosul</td>
+<td>76.16</td>
+<td>42.91</td>
+<td>39.16</td>
+<td>47.46</td>
+<td>151259</td>
+</tr>
+<tr class="even">
+<td>Aleppo</td>
+<td>74.42</td>
+<td>65.15</td>
+<td>52.71</td>
+<td>85.27</td>
+<td>73634</td>
+</tr>
+<tr class="odd">
+<td><strong>All</strong></td>
+<td>82.0</td>
+<td>60.92</td>
+<td>51.22</td>
+<td>75.16</td>
+<td>700500</td>
+</tr>
+</tbody>
+</table>
+<p>Reciever-Operating Characteristic (ROC) curves for each country are also provided below. <img src="figs/roc.png" class="img-fluid"></p>
 </section>
 
 </main>
