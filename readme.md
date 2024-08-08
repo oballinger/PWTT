@@ -12,6 +12,7 @@
     <img src="https://img.shields.io/badge/Benchmark%20Dataset-8A2BE2" alt="Benchmark Dataset">
   </a>
 </div>
+
 ![](figs/pwtt_pre_post.png)
 
 The generation of public information regarding buildings damaged by conflict has become particularly important in the context of recent, highly destructive wars in Gaza and Ukraine. This paper develops the Pixelwise T-Test (PWTT), a new algorithm for open-access battle damage estimation that is accurate, lightweight, and generalizable. The PWTT addresses many of the problems associated with expense, coverage consistency, and domain shift that affect deep-learning based approaches to building damage detection, and outperforms the state of the art deep learning model on unseen areas. 
