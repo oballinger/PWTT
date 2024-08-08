@@ -1,7 +1,11 @@
 <h1 align="center">Pixel-Wise T-Test</h1>
 <h2 align="center">A New Algorithm for Battle Damage Detection using Sentinel-1 Imagery </h2>
 
-<p align="center">[![](https://img.shields.io/badge/arXiv-paper-b31b1b.svg)](https://arxiv.org/pdf/2405.06323)  [![](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/oballinger/PWTT/blob/main/pwtt_quickstart.ipynb)   [![](https://img.shields.io/badge/Benchmark%20Dataset-8A2BE2)](https://drive.google.com/file/d/1AjsCJ5Wc0xDRUcc0VHtATLWee2lVN8RM/view?usp=sharing)</p>
+<center>
+
+[![](https://img.shields.io/badge/arXiv-paper-b31b1b.svg)](https://arxiv.org/pdf/2405.06323)  [![](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/oballinger/PWTT/blob/main/pwtt_quickstart.ipynb)   [![](https://img.shields.io/badge/Benchmark%20Dataset-8A2BE2)](https://drive.google.com/file/d/1AjsCJ5Wc0xDRUcc0VHtATLWee2lVN8RM/view?usp=sharing)
+
+</center>
 
 ![](figs/pwtt_pre_post.png)
 
