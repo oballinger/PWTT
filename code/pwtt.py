@@ -63,12 +63,14 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval):
     # Calculate the mean, standard deviation, and number of images for the pre-event period
     pre_mean = pre.mean()
     pre_sd = pre.reduce(ee.Reducer.stdDev())
-    pre_n = pre.count()
-
+    #pre_n = pre.count()
+    pre_n = ee.Number(pre.aggregate_array('orbitNumber_start').distinct().size());
+    
     # Calculate the mean, standard deviation, and number of images for the pre-event period
     post_mean = post.mean()
     post_sd = post.reduce(ee.Reducer.stdDev())
-    post_n = post.count()
+    #post_n = post.count()
+    post_n = ee.Number(post.aggregate_array('orbitNumber_start').distinct().size());
 
     # Calculate the pooled standard deviation
     pooled_sd = (pre_sd.pow(2)
@@ -88,20 +90,20 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval):
     # Return the t-values for each pixel
     return change
 
-def filter_s1(aor, inference_start, war_start, pre_interval, post_interval, footprints=None, viz=False, export=False,  export_dir='PWTT_Export', export_name=None, export_scale=10):
+def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False,  export_dir='PWTT_Export', export_name=None, export_scale=10):
     # Filter the image collection to the ascending or descending orbit
-    #turn aor in to a feature collection
+    #turn aoi in to a feature collection
     inference_start=ee.Date(inference_start)
     war_start=ee.Date(war_start)
-    aor = ee.FeatureCollection(aor)
+    aoi = ee.FeatureCollection(aoi)
     orbits = ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
         .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")) \
         .filter(ee.Filter.eq("instrumentMode", "IW")) \
-        .filterBounds(aor) \
+        .filterBounds(aoi) \
         .filterDate(ee.Date(inference_start), ee.Date(inference_start).advance(2, 'months')) \
         .aggregate_array('relativeOrbitNumber_start') \
         .distinct()
-        #.filter(ee.Filter.contains('.geo', aor.geometry())) \
+        #.filter(ee.Filter.contains('.geo', aoi.geometry())) \
     #orbits.getInfo()  # Print the orbits
 
     def map_orbit(orbit):
@@ -112,7 +114,7 @@ def filter_s1(aor, inference_start, war_start, pre_interval, post_interval, foot
             .map(lee_filter) \
             .select(['VV', 'VH'])
 
-        image = ttest(s1, inference_start, war_start, pre_interval, post_interval)
+        image = ttest(s1,inference_start, war_start, pre_interval, post_interval)
         return image
     urban = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1').filterDate(
         war_start.advance(-1 * pre_interval, 'months'), war_start).select('built').mean()
@@ -121,7 +123,7 @@ def filter_s1(aor, inference_start, war_start, pre_interval, post_interval, foot
     #image=image.addBands((image.select('VV').add(image.select('VH')).divide(2)).rename('mean_change')).select('mean_change')
     image=image.addBands(image.select('VV').max(image.select('VH')).rename('max_change')).select('max_change')
 
-    image=image.focalMedian(10, 'gaussian', 'meters').clip(aor)#.updateMask(urban.gt(0.1))
+    image=image.focalMedian(10, 'gaussian', 'meters').clip(aoi).updateMask(urban.gt(0.1))
 
     k20=image.convolve(ee.Kernel.circle(20,'meters',True)).rename('k20')
     k50=image.convolve(ee.Kernel.circle(50,'meters',True)).rename('k50')
@@ -135,10 +137,10 @@ def filter_s1(aor, inference_start, war_start, pre_interval, post_interval, foot
         Map = geemap.Map()
         Map.add_basemap('SATELLITE')
         Map.addLayer(image.select('mean_change'), {'min': 3, 'max': 5, 'opacity': 0.5, 'palette': ["yellow", "red", "purple"]}, "T-test")
-        Map.centerObject(aor)
+        Map.centerObject(aoi)
         return Map
     if type(footprints) != type(None):
-        fc=ee.FeatureCollection(footprints).filterBounds(aor)
+        fc=ee.FeatureCollection(footprints).filterBounds(aoi)
         fp=image.reduceRegions(
         collection=fc,
         reducer=ee.Reducer.mean(),
