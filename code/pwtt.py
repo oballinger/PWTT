@@ -100,10 +100,11 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
         .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")) \
         .filter(ee.Filter.eq("instrumentMode", "IW")) \
         .filterBounds(aoi) \
-        .filterDate(ee.Date(inference_start), ee.Date(inference_start).advance(2, 'months')) \
+        .filter(ee.Filter.contains('.geo', aoi.geometry())) \
+        .filterDate(ee.Date(inference_start), ee.Date(inference_start).advance(post_interval, 'months')) \
         .aggregate_array('relativeOrbitNumber_start') \
         .distinct()
-        #.filter(ee.Filter.contains('.geo', aoi.geometry())) \
+        # .filter(ee.Filter.contains('.geo', aoi.geometry())) \
     #orbits.getInfo()  # Print the orbits
 
     def map_orbit(orbit):
@@ -112,7 +113,8 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
             .filter(ee.Filter.eq("instrumentMode", "IW")) \
             .filter(ee.Filter.eq("relativeOrbitNumber_start", orbit)) \
             .map(lee_filter) \
-            .select(['VV', 'VH'])
+            .select(['VV', 'VH'])\
+            .map(lambda image: image.log())
 
         image = ttest(s1,inference_start, war_start, pre_interval, post_interval)
         return image
@@ -125,13 +127,14 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
 
     image=image.focalMedian(10, 'gaussian', 'meters').clip(aoi).updateMask(urban.gt(0.1))
 
-    k20=image.convolve(ee.Kernel.circle(20,'meters',True)).rename('k20')
+    #k20=image.convolve(ee.Kernel.circle(20,'meters',True)).rename('k20')
     k50=image.convolve(ee.Kernel.circle(50,'meters',True)).rename('k50')
     k100=image.convolve(ee.Kernel.circle(100,'meters',True)).rename('k100')
+    k150=image.convolve(ee.Kernel.circle(150,'meters',True)).rename('k150')
 
-    image=image.addBands([k20,k50,k100])
+    image=image.addBands([k50,k100,k150])
     #calculate mean of all four bands
-    image=image.addBands((image.select('max_change').add(image.select('k20')).add(image.select('k50')).add(image.select('k100')).divide(4)).rename('mean_change')).select('mean_change')
+    image=image.addBands((image.select('max_change').add(image.select('k50')).add(image.select('k100')).add(image.select('k150')).divide(4)).rename('mean_change'))#.select('mean_change')
 
     if viz:
         Map = geemap.Map()
@@ -223,3 +226,89 @@ def run(name, pre_interval, post_interval, datestr='2024-01-01'):
         scale=10
     )
     #task_image.start()
+
+
+    import ee
+
+
+def terrain_flattening(collection, TERRAIN_FLATTENING_MODEL, DEM, TERRAIN_FLATTENING_ADDITIONAL_LAYOVER_SHADOW_BUFFER):
+    '''
+    Terrain Flattening
+
+    Vollrath, A., Mullissa, A., & Reiche, J. (2020). Angular-Based Radiometric Slope Correction for Sentinel-1 on Google Earth Engine. 
+    Remote Sensing, 12(11), [1867]. https://doi.org/10.3390/rs12111867
+
+    '''
+    ninetyRad = ee.Image.constant(90).multiply(3.14159265359 / 180)
+
+    def volumetric_model_SCF(theta_iRad, alpha_rRad):
+        nominator = (ninetyRad.subtract(theta_iRad).add(alpha_rRad)).tan()
+        denominator = (ninetyRad.subtract(theta_iRad)).tan()
+        return nominator.divide(denominator)
+
+    def direct_model_SCF(theta_iRad, alpha_rRad, alpha_azRad):
+        nominator = (ninetyRad.subtract(theta_iRad)).cos()
+        denominator = alpha_azRad.cos().multiply((ninetyRad.subtract(theta_iRad).add(alpha_rRad)).cos())
+        return nominator.divide(denominator)
+
+    def erode(image, distance):
+        d = (image.Not().unmask(1)
+             .fastDistanceTransform(30).sqrt()
+             .multiply(ee.Image.pixelArea().sqrt()))
+        return image.updateMask(d.gt(distance))
+
+    def masking(alpha_rRad, theta_iRad, buffer):
+        layover = alpha_rRad.lt(theta_iRad).rename('layover')
+        shadow = alpha_rRad.gt(ee.Image.constant(-1).multiply(ninetyRad.subtract(theta_iRad))).rename('shadow')
+        mask = layover.And(shadow)
+        if buffer > 0:
+            mask = erode(mask, buffer)
+        return mask.rename('no_data_mask')
+
+    def correct(image):
+        bandNames = image.bandNames()
+        geom = image.geometry()
+        proj = image.select(1).projection()
+
+        elevation = DEM.resample('bilinear').reproject({
+            'crs': proj,
+            'scale': 10
+        }).clip(geom)
+
+        heading = ee.Terrain.aspect(image.select('angle'))\
+            .reduceRegion(ee.Reducer.mean(), image.geometry(), 1000)\
+            .get('aspect')
+
+        heading = ee.Number(heading).where(ee.Number(heading).gt(180), ee.Number(heading).subtract(360))
+        theta_iRad = image.select('angle').multiply(3.14159265359 / 180)
+        phi_iRad = ee.Image.constant(heading).multiply(3.14159265359 / 180)
+
+        alpha_sRad = ee.Terrain.slope(elevation).select('slope').multiply(3.14159265359 / 180)
+
+        aspect = ee.Terrain.aspect(elevation).select('aspect').clip(geom)
+        aspect_minus = aspect.updateMask(aspect.gt(180)).subtract(360)
+        phi_sRad = aspect.updateMask(aspect.lte(180)).unmask().add(aspect_minus.unmask())\
+            .multiply(-1).multiply(3.14159265359 / 180)
+
+        phi_rRad = phi_iRad.subtract(phi_sRad)
+        alpha_rRad = (alpha_sRad.tan().multiply(phi_rRad.cos())).atan()
+        alpha_azRad = (alpha_sRad.tan().multiply(phi_rRad.sin())).atan()
+        theta_liaRad = (alpha_azRad.cos().multiply((theta_iRad.subtract(alpha_rRad)).cos())).acos()
+        theta_liaDeg = theta_liaRad.multiply(180 / 3.14159265359)
+
+        gamma0 = image.divide(theta_iRad.cos())
+
+        if TERRAIN_FLATTENING_MODEL == 'VOLUME':
+            scf = volumetric_model_SCF(theta_iRad, alpha_rRad)
+        elif TERRAIN_FLATTENING_MODEL == 'DIRECT':
+            scf = direct_model_SCF(theta_iRad, alpha_rRad, alpha_azRad)
+
+        gamma0_flat = gamma0.multiply(scf)
+        mask = masking(alpha_rRad, theta_iRad, TERRAIN_FLATTENING_ADDITIONAL_LAYOVER_SHADOW_BUFFER)
+
+        output = gamma0_flat.mask(mask).rename(bandNames).copyProperties(image)
+        output = ee.Image(output).addBands(image.select('angle'), None, True)
+
+        return output.set('system:time_start', image.get('system:time_start'))
+
+    return collection.map(correct)
