@@ -112,6 +112,7 @@ Building footprint data is sourced from the Microsoft Building Footprints datase
 The table below reports the accuracy statistics for the PWTT algorithm in 12 cities, assessed using the benchmark dataset above. 
 
 | Country   | City               | AUC   | Accuracy | F1    | Precision | Recall | N       |
+|-----------|---------------------|-------|----------|-------|-----------|--------|---------|
 | Palestine | Gaza               | 83.32 | 75.41    | 78.2  | 70.42     | 87.91  | 228728  |
 | Ukraine   | Kremenchuk         | 92.56 | 98.82    | 2.73  | 2.68      | 2.77   | 27497   |
 | Ukraine   | Bucha              | 90.19 | 98.19    | 71.9  | 98.27     | 56.68  | 5739    |
