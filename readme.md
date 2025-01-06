@@ -19,6 +19,11 @@ The PWTT utilizes Synthetic Aperture Radar imagery from the Sentinel-1 satellite
 
 The green dashed line and shaded area represent the pixel's mean backscatter amplitude $\pm$ 1 standard deviation prior to the invasion, while the red line and shaded area represent these statistics following the building's destruction.
 
+The diagram below displays the full PWTT process:
+
+![](figs/flowchart.png)
+
+
 ## Python Quickstart [![](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/oballinger/PWTT/blob/main/pwtt_quickstart.ipynb)
 
 
@@ -68,7 +73,7 @@ pwtt.filter_s1(aoi=bakhmut,
 
 ## Validation Data 
 
-Accuracy assessments are carried out using an original dataset of 700,500 annotated building footprints, spanning 12 cities in four different countries. This dataset was compiled by spatially joining damage annotations from the United Nations Satellite Centre (UNOSAT) with data on building footprints. The dataset can be downloaded [here](https://drive.google.com/file/d/1AjsCJ5Wc0xDRUcc0VHtATLWee2lVN8RM/view?usp=sharing).
+Accuracy assessments are carried out using an original dataset of 700,500 annotated building footprints, spanning 12 cities in four different countries. This dataset was compiled by spatially joining damage annotations from the United Nations Satellite Centre (UNOSAT) with data on building footprints. The dataset can be downloaded [here](https://drive.google.com/file/d/12RsrfU8m-cvtONohD6FBcF21OPoEA_Mf/view?usp=sharing).
 
 <h3 align="center">Benchmark Dataset</h3>
 
