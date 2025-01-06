@@ -107,9 +107,7 @@ Building footprint data is sourced from the Microsoft Building Footprints datase
 The table below reports the accuracy statistics for the PWTT algorithm in 12 cities, assessed using the benchmark dataset above. 
 
 | Country   | City               | AUC   | Accuracy | F1    | Precision | Recall | N       |
-|-----------|---------------------|-------|----------|-------|-----------|--------|---------|
 | Palestine | Gaza               | 83.32 | 75.41    | 78.2  | 70.42     | 87.91  | 228728  |
-|-----------|---------------------|-------|----------|-------|-----------|--------|---------|
 | Ukraine   | Kremenchuk         | 92.56 | 98.82    | 2.73  | 2.68      | 2.77   | 27497   |
 | Ukraine   | Bucha              | 90.19 | 98.19    | 71.9  | 98.27     | 56.68  | 5739    |
 | Ukraine   | Okhtyrka           | 89.28 | 98.9     | 53.14 | 76.28     | 40.77  | 15905   |
@@ -129,12 +127,9 @@ The table below reports the accuracy statistics for the PWTT algorithm in 12 cit
 | Ukraine   | Sievierodonetsk    | 69.18 | 59.3     | 62.53 | 50.71     | 81.54  | 5970    |
 | Ukraine   | Melitopol          | 66.84 | 96.77    | 2.67  | 1.78      | 5.33   | 32373   |
 | Ukraine   | Avdiivka           | 66.51 | 60.64    | 39.8  | 28.05     | 68.5   | 7262    |
-|-----------|---------------------|-------|----------|-------|-----------|--------|---------|
 | Syria     | Raqqa              | 75.6  | 66.26    | 73.87 | 63.21     | 88.87  | 24689   |
 | Syria     | Aleppo             | 71.76 | 61.49    | 58.82 | 46.28     | 80.67  | 65870   |
-|-----------|---------------------|-------|----------|-------|-----------|--------|---------|
 | Iraq      | Mosul              | 74.91 | 81.16    | 41.18 | 35.18     | 49.64  | 137794  |
-|-----------|---------------------|-------|----------|-------|-----------|--------|---------|
 | **All**   | **All**            | 84.17 | 76.4     | 58.2  | 48.04     | 73.82  | 873072  |
 
 
