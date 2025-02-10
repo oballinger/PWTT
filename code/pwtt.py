@@ -186,7 +186,6 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
             folder=export_dir,
             scale=export_scale,
             maxPixels=1e13,
-            tileScale=8,
         )
         task.start()
     return image
