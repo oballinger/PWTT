@@ -90,7 +90,7 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval):
     # Return the t-values for each pixel
     return change
 
-def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False,  export_dir='PWTT_Export', export_name=None, export_scale=10):
+def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False,  export_dir='PWTT_Export', export_name=None, export_scale=10, grid_scale=500, export_grid=False):
     # Filter the image collection to the ascending or descending orbit
     #turn aoi in to a feature collection
     inference_start=ee.Date(inference_start)
@@ -135,7 +135,23 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
     image=image.addBands([k50,k100,k150])
     #calculate mean of all four bands
     image=image.addBands((image.select('max_change').add(image.select('k50')).add(image.select('k100')).add(image.select('k150')).divide(4)).rename('mean_change'))#.select('mean_change')
-
+    #500m coveringgrid
+    
+    if export_grid:
+        grid=aoi.geometry().bounds().coveringGrid('EPSG:3857', grid_scale)
+        grid=image.reduceRegions({
+            'collection': grid,
+            'reducer': ee.Reducer.mean(),
+            'scale': 10,
+            'tileScale': 8,
+        })
+        task_grid = ee.batch.Export.table.toDrive(
+            collection=grid,
+            description=export_name+'_grid',
+            folder=export_dir,
+            fileFormat='CSV'
+        )
+    
     if viz:
         Map = geemap.Map()
         Map.add_basemap('SATELLITE')
