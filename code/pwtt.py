@@ -132,10 +132,12 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
     k100=image.convolve(ee.Kernel.circle(100,'meters',True)).rename('k100')
     k150=image.convolve(ee.Kernel.circle(150,'meters',True)).rename('k150')
 
+    damage=image.select('max_change').gt(3).rename('damage')
+    image=image.addBands(damage)
     image=image.addBands([k50,k100,k150])
     #calculate mean of all four bands
-    image=image.addBands((image.select('max_change').add(image.select('k50')).add(image.select('k100')).add(image.select('k150')).divide(4)).rename('mean_change'))#.select('mean_change')
-    #500m coveringgrid
+    image=image.addBands((image.select('max_change').add(image.select('k50')).add(image.select('k100')).add(image.select('k150')).divide(4)).rename('T_statistic'))#.select('mean_change')
+    image=image.select('T_statistic', 'damage')
     
     if export_grid:
         grid=aoi.geometry().bounds().coveringGrid('EPSG:3857', grid_scale)
@@ -181,7 +183,8 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
             image=image,
             description=export_name,
             folder=export_dir,
-            scale=export_scale
+            scale=export_scale,
+            maxPixels=1e13
         )
         task.start()
     return image
