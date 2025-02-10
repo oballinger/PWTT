@@ -158,7 +158,7 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
     if viz:
         Map = geemap.Map()
         Map.add_basemap('SATELLITE')
-        Map.addLayer(image.select('mean_change'), {'min': 3, 'max': 5, 'opacity': 0.5, 'palette': ["yellow", "red", "purple"]}, "T-test")
+        Map.addLayer(image.select('T_statistic'), {'min': 3, 'max': 5, 'opacity': 0.5, 'palette': ["yellow", "red", "purple"]}, "T-test")
         Map.centerObject(aoi)
         return Map
     
@@ -185,7 +185,8 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
             description=export_name,
             folder=export_dir,
             scale=export_scale,
-            maxPixels=1e13
+            maxPixels=1e13,
+            tileScale=8,
         )
         task.start()
     return image
