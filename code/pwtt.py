@@ -138,6 +138,7 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
     #calculate mean of all four bands
     image=image.addBands((image.select('max_change').add(image.select('k50')).add(image.select('k100')).add(image.select('k150')).divide(4)).rename('T_statistic'))#.select('mean_change')
     image=image.select('T_statistic', 'damage')
+    image=image.clip(aoi)
     
     if export_grid:
         grid=aoi.geometry().bounds().coveringGrid('EPSG:3857', grid_scale)
