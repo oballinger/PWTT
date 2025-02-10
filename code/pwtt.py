@@ -158,6 +158,7 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
         Map.addLayer(image.select('mean_change'), {'min': 3, 'max': 5, 'opacity': 0.5, 'palette': ["yellow", "red", "purple"]}, "T-test")
         Map.centerObject(aoi)
         return Map
+    
     if type(footprints) != type(None):
         fc=ee.FeatureCollection(footprints).filterBounds(aoi)
         fp=image.reduceRegions(
@@ -171,20 +172,19 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
             collection=fp,
             description=export_name,
             folder=export_dir,
-            fileFormat='CSV'
+            fileFormat='GEOJSON'
         )
         task_fp.start()
 
-    else:
-        if export:
-            task = ee.batch.Export.image.toDrive(
-                image=image,
-                description=export_name,
-                folder=export_dir,
-                scale=export_scale
-            )
-            task.start
-        return image
+    if export:
+        task = ee.batch.Export.image.toDrive(
+            image=image,
+            description=export_name,
+            folder=export_dir,
+            scale=export_scale
+        )
+        task.start()
+    return image
 
 def run(name, pre_interval, post_interval, datestr='2024-01-01'):
     sensor_date = ee.Date(datestr)
