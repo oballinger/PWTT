@@ -1,0 +1,4 @@
+data/
+code/*.ipynb
+website
+.DS_Store
