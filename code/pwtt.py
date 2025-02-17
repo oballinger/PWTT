@@ -114,7 +114,8 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
             .filter(ee.Filter.eq("relativeOrbitNumber_start", orbit)) \
             .map(lee_filter) \
             .select(['VV', 'VH'])\
-            .map(lambda image: image.log())
+            .map(lambda image: image.log())\
+            .filterBounds(aoi) \
 
         image = ttest(s1,inference_start, war_start, pre_interval, post_interval)
         return image
