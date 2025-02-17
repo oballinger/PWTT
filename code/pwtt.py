@@ -103,7 +103,7 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
         .filterBounds(aoi) \
         .filterDate(ee.Date(inference_start), ee.Date(inference_start).advance(post_interval, 'months')) \
         .aggregate_array('relativeOrbitNumber_start') \
-        .filter(ee.Filter.contains('.geo', aoi))\
+        .filter(ee.Filter.contains('.geo', aoi.geometry()))\
         .distinct()
 
     #orbits.getInfo()  # Print the orbits
