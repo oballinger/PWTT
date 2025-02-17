@@ -100,8 +100,8 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
     orbits = ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
         .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")) \
         .filter(ee.Filter.eq("instrumentMode", "IW")) \
+        .filter(ee.Filter.contains('.geo', ee.FeatureCollection(aoi).geometry()))\
         .filterDate(ee.Date(inference_start), ee.Date(inference_start).advance(post_interval, 'months')) \
-        .filter(ee.Filter.contains(aoi))\
         .aggregate_array('relativeOrbitNumber_start') \
         .distinct()
 
