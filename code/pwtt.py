@@ -95,7 +95,8 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
     #turn aoi in to a feature collection
     inference_start=ee.Date(inference_start)
     war_start=ee.Date(war_start)
-    aoi = ee.FeatureCollection(aoi)
+    #aoi = ee.FeatureCollection(aoi)
+
     orbits = ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
         .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")) \
         .filter(ee.Filter.eq("instrumentMode", "IW")) \
