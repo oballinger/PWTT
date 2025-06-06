@@ -90,21 +90,22 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval):
     # Return the t-values for each pixel
     return change
 
-def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False,  export_dir='PWTT_Export', export_name=None, export_scale=10):
+def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False,  export_dir='PWTT_Export', export_name=None, export_scale=10, grid_scale=500, export_grid=False):
     # Filter the image collection to the ascending or descending orbit
     #turn aoi in to a feature collection
     inference_start=ee.Date(inference_start)
     war_start=ee.Date(war_start)
-    aoi = ee.FeatureCollection(aoi)
+    #aoi = ee.FeatureCollection(aoi)
+
     orbits = ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
         .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")) \
         .filter(ee.Filter.eq("instrumentMode", "IW")) \
         .filterBounds(aoi) \
-        .filter(ee.Filter.contains('.geo', aoi.geometry())) \
+        .filter(ee.Filter.contains('.geo', ee.FeatureCollection(aoi).geometry()))\
         .filterDate(ee.Date(inference_start), ee.Date(inference_start).advance(post_interval, 'months')) \
         .aggregate_array('relativeOrbitNumber_start') \
         .distinct()
-        # .filter(ee.Filter.contains('.geo', aoi.geometry())) \
+
     #orbits.getInfo()  # Print the orbits
 
     def map_orbit(orbit):
@@ -114,7 +115,8 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
             .filter(ee.Filter.eq("relativeOrbitNumber_start", orbit)) \
             .map(lee_filter) \
             .select(['VV', 'VH'])\
-            .map(lambda image: image.log())
+            .map(lambda image: image.log())\
+            .filterBounds(aoi) \
 
         image = ttest(s1,inference_start, war_start, pre_interval, post_interval)
         return image
@@ -132,16 +134,36 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
     k100=image.convolve(ee.Kernel.circle(100,'meters',True)).rename('k100')
     k150=image.convolve(ee.Kernel.circle(150,'meters',True)).rename('k150')
 
+    damage=image.select('max_change').gt(3).rename('damage')
+    image=image.addBands(damage)
     image=image.addBands([k50,k100,k150])
     #calculate mean of all four bands
-    image=image.addBands((image.select('max_change').add(image.select('k50')).add(image.select('k100')).add(image.select('k150')).divide(4)).rename('mean_change'))#.select('mean_change')
-
+    image=image.addBands((image.select('max_change').add(image.select('k50')).add(image.select('k100')).add(image.select('k150')).divide(4)).rename('T_statistic'))#.select('mean_change')
+    image=image.select('T_statistic', 'damage').toFloat()
+    image=image.clip(aoi)
+    
+    if export_grid:
+        grid=aoi.geometry().bounds().coveringGrid('EPSG:3857', grid_scale)
+        grid=image.reduceRegions({
+            'collection': grid,
+            'reducer': ee.Reducer.mean(),
+            'scale': 10,
+            'tileScale': 8,
+        })
+        task_grid = ee.batch.Export.table.toDrive(
+            collection=grid,
+            description=export_name+'_grid',
+            folder=export_dir,
+            fileFormat='CSV'
+        )
+    
     if viz:
         Map = geemap.Map()
         Map.add_basemap('SATELLITE')
-        Map.addLayer(image.select('mean_change'), {'min': 3, 'max': 5, 'opacity': 0.5, 'palette': ["yellow", "red", "purple"]}, "T-test")
+        Map.addLayer(image.select('T_statistic'), {'min': 3, 'max': 5, 'opacity': 0.5, 'palette': ["yellow", "red", "purple"]}, "T-test")
         Map.centerObject(aoi)
         return Map
+    
     if type(footprints) != type(None):
         fc=ee.FeatureCollection(footprints).filterBounds(aoi)
         fp=image.reduceRegions(
@@ -155,20 +177,20 @@ def filter_s1(aoi,inference_start,war_start, pre_interval=12, post_interval=2, f
             collection=fp,
             description=export_name,
             folder=export_dir,
-            fileFormat='CSV'
+            fileFormat='GEOJSON'
         )
         task_fp.start()
 
-    else:
-        if export:
-            task = ee.batch.Export.image.toDrive(
-                image=image,
-                description=export_name,
-                folder=export_dir,
-                scale=export_scale
-            )
-            task.start
-        return image
+    if export:
+        task = ee.batch.Export.image.toDrive(
+            image=image.select('k50'),
+            description=export_name,
+            folder=export_dir,
+            scale=export_scale,
+            maxPixels=1e13,
+        )
+        task.start()
+    return image
 
 def run(name, pre_interval, post_interval, datestr='2024-01-01'):
     sensor_date = ee.Date(datestr)

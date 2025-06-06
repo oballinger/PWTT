@@ -1,0 +1,20 @@
+{
+  "index.qmd": {
+    "index.html": "0af5779b"
+  },
+  "ch1.qmd": {
+    "ch1.html": "8b4a77f5"
+  },
+  "ch2.qmd": {
+    "ch2.html": "74631ff5"
+  },
+  "refineries.qmd": {
+    "refineries.html": "6c410d2a"
+  },
+  "object_detection.qmd": {
+    "object_detection.html": "44222807"
+  },
+  "blast.qmd": {
+    "blast.html": "1373e664"
+  }
+}

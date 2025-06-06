@@ -1,0 +1,320 @@
+{
+  "hash": "191203021c68990c1e54f11cd8f20692",
+  "result": {
+    "markdown": "# Refinery Identification {.unnumbered}\n\n*Topics: multispectral satellite imagery, machine learning, informal economies, war.*\n\nIn Syria, over a decade of war has ravaged one of its most important industries. Oil is a basic necessity for local residents who need to heat their homes and keep the lights on. It's also an important source of income for armed groups who control production; by some estimates the Islamic State was making over [$40 million](https://www.rand.org/blog/2017/10/oil-extortion-still-paying-off-for-isis.html) per month in oil revenues, and the Syrian Democratic Forces were making [$120 million](https://www.al-monitor.com/originals/2021/08/syrian-government-kurds-discuss-plans-oil-trade) per year selling oil to their adversaries, the Syrian Government. This, in turn, has made oil production facilies a frequent target of [airstrikes](https://www.gov.uk/government/publications/british-forces-air-strikes-in-iraq-monthly-list/january-2015), leading to catastrophic environmental consequences. \n\nThe destruction of Syria's oil infrastructure and its importance as a source of revenue for armed groups has led to a massive rise in makeshift oil extraction and refining. These makeshift refineries are often constructed by digging a large pit, lining it with a tarp, and filling it with polluted water. A furnace heats crude oil, which is run through a pipe cooled by the basin and collected in drums: \n\n![credit: PAX/Wim Zwijnenburg](images/makeshift-refining.png)\nWim Zwijnenburg wrote an excellent [Bellingcat article](https://www.bellingcat.com/news/2020/04/24/dying-to-keep-warm-oil-trade-and-makeshift-refining-in-north-west-syria/) on the subject, which you should read before going any further in this tutorial. In the article, Wim notes that these facilities \"can be spotted by the ditch and the black spot at the end with oil waste residues, which blacken the soil around the furnace.\" These refineries also frequently leak, blackening large swaths of land around them. \n\n![source: https://www.bellingcat.com/news/2020/04/24/dying-to-keep-warm-oil-trade-and-makeshift-refining-in-north-west-syria/](images/refinery.png)\n\nLooking around Northwestern Syria, we can see agricultural fields pockmarked by these makeshift refineries (you can pan around and zoom in):\n\n::: {.cell execution_count=1}\n\n::: {.cell-output .cell-output-display execution_count=1}\n```{=html}\n<script type=\"application/vnd.jupyter.widget-view+json\">\n{\"model_id\":\"db6e5038f1d44d0e8bb76f48761b0c45\",\"version_major\":2,\"version_minor\":0}\n</script>\n```\n:::\n:::\n\n\nPrevious efforts to quantify informal oil production have involved manually sifting through satellite imagery and counting them. This is a painstaking process that leaves a number of important questions unanswered. Even if we were to count all of the individual refineries, could we get an estimate of polluted area? What if we wanted to count the refineries in a new part of Syria? Or get annual or even monthly estimates of new refineries? \n\nBelow is an Earth Engine application that automates the detection of makeshift refineries in Northeastern Syria, using mutlispectral satellite imagery and machine learning. Blue dots represent the locations of predicted makeshift oil refineries and general oil pollution, while red areas indicate areas predicted to be contaminated by oil.\n\n:::{.column-page}\n\n<iframe src='https://ollielballinger.users.earthengine.app/view/rojavaoil' width='100%' height='700px'></iframe>\n\n:::\n\nYou can draw an Area of Interest (AOI) and get the total number of contaminated points as well as the total number of contaminated square meters within the AOI. drawing multiple AOIs will show a running total of these statistics. It's not perfect-- it misses some refineries and falsely identifies some others-- but it is generally quite accurate; you can visually verify the results of the prediction by zooming in using the \"+\" button. You can toggle different layers using the \"layers\" tab as well. This tool could be used to get an estimate of oil production in a user-defined area, and eventually to direct cleanup efforts. The fullscreen version of the application can be found [here](https://ollielballinger.users.earthengine.app/view/rojavaoil), and the source code [here](https://code.earthengine.google.com/7a80f10412e1eb2a4d2c5d95989e70bd). This tutorial will first cover the basics of multispectral remote sensing, before moving into a step-by-step guide in the construction of this model.\n\n\n# Machine Learning Workflow\n\n## Pre-Processing\n\nAs always, the first step in our project will be to load and pre-process satellite imagery. For this project, we'll be using Sentinel-2 imagery. Let's load imagery from 2020-2021, filter out cloudy images, and define visualization parameters:\n\n```js\nvar start='2020-04-01'\nvar end='2021-07-01'\n\nvar bands = ['B2', 'B3', 'B4','B5','B6','B7','B8', 'B8A','B11','B12']\n\nvar sentinel = ee.ImageCollection('COPERNICUS/S2_SR')\n                  .filter(ee.Filter.date(start, end))\n                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))\n                  .mean()\n                  .select(bands)\n\nvar s_rgb = {\n  min: 0.0,\n  max: 3000,\n  bands:['B4', 'B3', 'B2'],\n  opacity:1\n};\n```\n\nWhen loading the Sentinel-2 imagery, I've also onlyh selected the bands that we will ultimately use in our analysis. There are a number of other bands included in the data that we don't need. I've omitted a few bands (B1, B9, B10) because they're collected at a much lower spatial resolution (60 meters) compared to the other bands.\n\nA couple types of landcover are so readily identifiable that we can remove them with thresholds. Water and vegetation both have spectral indices; we looked at NDVI above, but there's a similar one for water called NDWI. These can be calculated from Sentinel-2 imagery as follows:\n\n```js\nvar ndvi=sentinel.normalizedDifference(['B8','B4'])\n                  .select(['nd'],['ndvi'])\n\nvar ndwi=sentinel.normalizedDifference(['B3','B8'])\n                  .select(['nd'],['ndwi'])\n```\n\nWe use the `normalizedDifference` function and specify which bands we want to use for each index. NDVI uses the red and near infrared bands (B4 and B8), while NDWI uses bands 3 and 8. Finally, we want to rename the resulting band from 'nd' to the name of the spectral index.\n\nNow we can use these indices to filter out water and vegetation. We do this using the `updateMask` function, and specify that we want to remove areas that have an NDVI value higher than 0.2 and and NDWI value higher than 0.3. You can play around with these thesholds until you achieve the desired results.\n\n```js\n\nvar image=sentinel.updateMask(ndwi.lt(0.3))\n                  .updateMask(ndvi.lt(0.2))\n                  .addBands(ndvi)\n                  .select(bands)\n```\nWe also want to only select bands that are relevant to our analysis; Sentinel\n\nFinally, let's clip the image to our Area of Interest (AOI) and add it to the map using the visualization parameters we defined earlier. \n\n```js\nMap.addLayer(image.clip(AOI), s_rgb, 'Sentinel');\n```\n![water and vegetation have been removed from this Sentinel-2 image. What remains is largely fallow agricultural land, urban areas, and oil spills.](images/rojava_preprocessed.png)\n\nNow that we've loaded and preporcessed our satellite imagery, we can proceed with the rest of our task. Ultimately, we want to create a map of the study area which shows us different \"landcovers\" (materials). This can broadly be achieved in three steps:\n\n  1. Generate labeled landcover data\n  2. Train a model using labeled data \n  3. Validate the model\n\n## 1. Generating Labeled Data \n\nA vital step in any machine learning workflow is the generation of labeled data, which we will use to train a model to differentiated between different types of land cover and later to test the model's accuracy. By looking around the study area, we can get a sense of the different land cover classes that we might encounter: \n\n  1. Agricultural Land\n  2. Urban Areas\n  3. Oil Contamination\n\nNaturally we could subdivide each of these into sub-categories, and there are probably other classes we haven't included that may be present in the study area. The choice of classes is partly informed by the nature of the task at hand. In theory, the most efficient number of classes for this task would be two: oil, and everything else. The problem is that the \"everything else\" category would be pretty noisy since it would include a wide range of materials, making it harder to distinguish this from oil. In practice, a visual inspection of major landcover classes in the study area is a quick-and-dirty way of getting at roughly the right number of classes. This is also an iterative process: you can start with a set of labeled data, look at the model results, and adjust your sampling accordingly. More on this later.\n\nThe main landcover class we're interested in is, of course, oil. Some oil contamination is readily visible from the high resolution satellite basemap; rivers of oil flow from the leaking [Ger Zero refinery](https://zoom.earth/#view=36.947921,42.02871,16z/overlays=heat,labels:off,crosshair). We can draw polygons around the oil contamination like so: \n\n![](images/ger_zero.png)\n\nThe same process is applied to agricultural land and urban areas. In general, you want to make sure that you're sampling from all across the study area. I've generated between 4-10 polygons per landcover class in different places. We're now left with a featureCollection composed of polygons for each class. I've named them `oil`, `agriculture`, and `urban`. \n\nHowever, I don't just want to use all of the pixels contained in these polygons for training. There are several reasons for this. First, it would likely lead to [overfitting](https://en.wikipedia.org/wiki/Overfitting). Second, there are probably over a million pixels between all of the polygons, which would slow things down unnecessarily. Third, I haven't drawn the polygons to be equal sizes across classes, so I could end up with way more points from one class compared to another. It's OK to have some imbalance between classes, but you don't want it to be extreme. \n\nAs such, the next step involves taking random samples of points from *within* these polygons. I do so using the `randomPoints` function:\n\n```js\nvar oil_points=ee.FeatureCollection.randomPoints(oil, 3000).map(function(i){\n  return i.set({'class': 0})})\n  \nvar urban_points=ee.FeatureCollection.randomPoints(urban, 1000).map(function(i){\n  return i.set({'class': 1})})\n  \nvar agriculture_points=ee.FeatureCollection.randomPoints(agriculture, 2000).map(function(i){\n  return i.set({'class': 2})})\n```\n\nIn the first line, I create a new featureCollection called `oil_points` which contains 3000 points sampled from the polygons in the `oil` featureCollection. I then map through each of these points, and set a property called \"class\" equal to 0. I do the same for the urban and agricultural areas, setting the \"class\" property of these featureCollections to 1 and 2, respectively. Ultimately, our model will output a raster in which each pixel will contain one of these three values. A value of 0 in the output will represent the model predicting that that pixel is oil, based on the training data; a value of 1 would indicate predicted urban land cover, and 2 predicted agricultural landcover. \n\nNow we want to create one feature collection called \"sample\", which will contain all three sets of points. \n\n```js\nvar sample=ee.FeatureCollection([oil_points,\n                                  urban_points,\n                                  agriculture_points\n                                  ])\n                                  .flatten()\n                                  .randomColumn();\n```\n\nWe've also assigned a property called \"random\" using the `randomColumn` function. This lets us split our featureCollection into two: one used for training the model, and one used for validation. We'll use a 70-30 split.\n\n```js\nvar split=0.7\nvar training_sample = sample.filter(ee.Filter.lt('random', split));\nvar validation_sample = sample.filter(ee.Filter.gte('random', split));\n```\n\n## 2. Training a Model\n\nHaving generated labeled training and testing data, we now want to teach an algorithm to associate the pixels in those areas (in particular, their spectral profiles) with a specific landcover class. \n\nThe list of points we generated in the previous step contain a label (0: oil, 1: urban, 2: agriculture). However, they do not yet contain any information about the spectral profile of the Sentinel-2 image. The `sampleRegions` function lets us assign a the band values from an image as properties to our feature collection. We do this for both training sample and the validation sample. \n\n```js\nvar training = image.sampleRegions({\n  collection: training_sample,\n  properties: ['class'],\n  scale: 10,\n});\n\nvar validation = image.sampleRegions({\n  collection: validation_sample,\n  properties: ['class'],\n  scale: 10\n});\n```\n\nEach point in the featureCollections above will contain a property denoting each Sentinel-2 band's value at that location, as well as the property denoting the class label. \n\nNow we're ready to train the model. We'll be using a [Random Forest](https://en.wikipedia.org/wiki/Random_forest) classifier, which basically works by trying to separate your data into the specified classes by setting lots of thresholds in your input properties (in our case, Sentinel-2 band values). It's a versatile and widely-used model. \n\nWe first call a random forest classifier with 500 trees. More trees usually yields higher accuracy, though there are diminishing returns. Too many trees will result in your computation timing out. We then train the model using the `train` function, which we supply with the training data as well as the name of the property that contains our class labels (\"class\").\n\n```js\nvar model = ee.Classifier.smileRandomForest(500)\n                          .train(training, 'class');\n```\n\nThe trained model now associates Sentinel-2 band values with one of three landcover classes. We can now feed the model pixels it has never seen before, and it will use what it now knows about the spectral profiles of the differnt classes to predict the class of the new pixel. \n\n```js\nvar prediction = image.classify(model)\n```\n`prediction` is now a raster which contains one of three values (0: oil, 1: urban, 2: agriculture). We're only interested in oil, so let's isolate the regions in this raster that have a value of 0, and add them in red to the map:\n\n```js\nvar oil_prediction=prediction.updateMask(prediction.eq(0))\n\nMap.addLayer(oil_prediction, {palette:'red'}, 'Predicted Oil Conamination')\n```\n![](images/ger_zero_pred.png)\n\n## 3. Validation \n\nThe image above should look somewhat familiar. It's Ger Zero, where we trained part of our model. We can see in red the areas which the model predicts to be oil pollution. These largley align with the areas that we can see as being contaminated based on the high resolution basemap. It's not perfect, but it's pretty good. \n\nLet's scroll to another area, far from where the model was trained. \n![](images/small_refinery.png)\nThis image shows two clusters of makeshift refineries which were identified by the model. This is good, though we can only get so far by visually inspecting the output from our model. To get a better sense of our model's performance, we can use the validation data that we generated previously. Remember, these are labeled points which our model was not trained on, and has never seen before. \n\nWe'll take the `validation` featureCollection containing our labeled points, and have our model classify it.\n\n```js\nvar validated = validation.classify(model);\n```\n\nNow the `validated` variable is a featureCollection which contains both manual labels and predicted labels from our model. We can compare the manual labels to the predicted output to get a sense of how well our model is performing. This is called a Confusion Matrix (or an Error Matrix):\n\n```js\nvar testAccuracy = validated.errorMatrix('class', 'classification');\n\nprint('Confusion Matrix ', testAccuracy);\n```\n\n|              |                 |         |  *Labels* |                 |\n|:------------:|:---------------:|:-------:|:---------:|:---------------:|\n|              |                 | **Oil** | **Urban** | **Agriculture** |\n|              |     **Oil**     |  876    |     1     |        5        |\n| *Prediction* |    **Urban**    |   0     |    168    |        8        |\n|              | **Agriculture** | 1       |     4     |       514       |\n\nNow, we can see that of the 877 points that were labeled \"oil\", only one was falsely predicted to be agicultural land. The model also falsely predicted as oil one point that was labeled urban, and five points that were labeled agriculture. Not bad. We can get a sense of the model's overall accuracy using the `accuracy` function on the confusion matrix:\n\n```js\nprint('Validation overall accuracy: ', testAccuracy.accuracy())\n```\nThis tells us that the overall accuracy of our model is around 98%. However, we shouldn't take this estimate at face value. There are a number of complicated reasons ([spatial autocorrelation](https://www.sciencedirect.com/topics/computer-science/spatial-autocorrelation#:~:text=Spatial%20autocorrelation%20is%20the%20term,together%20to%20have%20similar%20values.) in the training data, for example) why this figure is probably inflatred. If we were submitting this analysis to a peer-reviewed journal, we'd take great care in addressing this, but for our purposes we can use the accuracy statistics to guide our analysis and get a rough sense of how well the model is performing. \n\nThis model isn't perfect; it often misclassifies the shorelines of lakes as oil, or certain parts of urban areas. As previously mentioned, training a model is often an iterative process. At this stage, if your accuracy is not as high as you'd like it to be, you can use the output to figure out how to tweak the model. For example, you may observe that your model is confusing urban areas with oil spills. You can draw a polygon over the erroneous area, label it urban landcover and retrain the model thereby hopefully improving accuracy. We could further refine our model in this way.\n\n# Communicating the Results\n\nNow that we've got a model that can identify oil from multispectral satellite imagery fairly well, we can set about making our results accessible. \n\nOne of the things we're particularly interested in is the distribution of small refineries. The way we're currently visualizing the prediction (the raster output from the model where predicted oil is shown in red and everything else is transparent) makes it hard to see these small refineries when we zoom out:\n\n![](images/big_red.png)\n\nWe can convert our raster into a series of points using the `reduceToVectors` function. In essence, this takes homogenous regions of an image (e.g., an area predicted to be oil surrounded by an area not predicted to be oil) and converts it into a point:\n\n```js\nvar vectors = oil_prediction.reduceToVectors({\n  geometry: AOI,\n  scale: 10,\n  geometryType: 'centroid',\n  eightConnected: true,\n  labelProperty: 'classification',\n  maxPixels:1653602926\n  }).filterBounds(AOI)\n\nMap.addLayer(vectors.style({color: 'black', fillColor: '#00f2ff', pointSize:5}),{},'Oil Contamination Points',false)\n```\n\nNow the distribution of small refineries is much more easily visible as blue dots:\n\n![](images/points.png)\n\nIf we zoom out even further, we can see clusters of points that correspond to areas of high oil production. Using geolocated photographs, we can roughly ground-truth the model output:\n\n![](images/UNEP.PNG)\n\n",
+    "supporting": [
+      "refineries_files/figure-epub"
+    ],
+    "filters": [],
+    "engineDependencies": {
+      "jupyter": [
+        {
+          "jsWidgets": false,
+          "jupyterWidgets": true,
+          "htmlLibraries": [],
+          "widgetsState": {
+            "state": {
+              "2b7e50ad261c4a0785dd63c865d68c0b": {
+                "model_module": "jupyter-leaflet",
+                "model_module_version": "^0.17",
+                "model_name": "LeafletTileLayerModel",
+                "state": {
+                  "_model_module": "jupyter-leaflet",
+                  "_model_module_version": "^0.17",
+                  "_model_name": "LeafletTileLayerModel",
+                  "_view_count": null,
+                  "_view_module": "jupyter-leaflet",
+                  "_view_module_version": "^0.17",
+                  "_view_name": "LeafletTileLayerView",
+                  "attribution": "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
+                  "base": true,
+                  "bottom": true,
+                  "bounds": null,
+                  "detect_retina": false,
+                  "loading": false,
+                  "max_native_zoom": null,
+                  "max_zoom": 18,
+                  "min_native_zoom": null,
+                  "min_zoom": 1,
+                  "name": "Esri.WorldImagery",
+                  "no_wrap": false,
+                  "opacity": 1,
+                  "options": [
+                    "attribution",
+                    "bounds",
+                    "detect_retina",
+                    "max_native_zoom",
+                    "max_zoom",
+                    "min_native_zoom",
+                    "min_zoom",
+                    "no_wrap",
+                    "tile_size",
+                    "tms",
+                    "zoom_offset"
+                  ],
+                  "pane": "",
+                  "popup": null,
+                  "popup_max_height": null,
+                  "popup_max_width": 300,
+                  "popup_min_width": 50,
+                  "show_loading": false,
+                  "tile_size": 256,
+                  "tms": false,
+                  "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                  "visible": true,
+                  "zoom_offset": 0
+                }
+              },
+              "71357d2b9c974188b40742fd740124b6": {
+                "model_module": "jupyter-leaflet",
+                "model_module_version": "^0.17",
+                "model_name": "LeafletMapStyleModel",
+                "state": {
+                  "_model_module": "jupyter-leaflet",
+                  "_model_module_version": "^0.17",
+                  "_model_name": "LeafletMapStyleModel",
+                  "_view_count": null,
+                  "_view_module": "@jupyter-widgets/base",
+                  "_view_module_version": "2.0.0",
+                  "_view_name": "StyleView",
+                  "cursor": "move"
+                }
+              },
+              "7ad903c990fc4e8385d86fc0e172c9e9": {
+                "model_module": "jupyter-leaflet",
+                "model_module_version": "^0.17",
+                "model_name": "LeafletAttributionControlModel",
+                "state": {
+                  "_model_module": "jupyter-leaflet",
+                  "_model_module_version": "^0.17",
+                  "_model_name": "LeafletAttributionControlModel",
+                  "_view_count": null,
+                  "_view_module": "jupyter-leaflet",
+                  "_view_module_version": "^0.17",
+                  "_view_name": "LeafletAttributionControlView",
+                  "options": [
+                    "position",
+                    "prefix"
+                  ],
+                  "position": "bottomright",
+                  "prefix": "ipyleaflet"
+                }
+              },
+              "aac0c6970dba4f8391896f10d0fd1ab8": {
+                "model_module": "@jupyter-widgets/base",
+                "model_module_version": "2.0.0",
+                "model_name": "LayoutModel",
+                "state": {
+                  "_model_module": "@jupyter-widgets/base",
+                  "_model_module_version": "2.0.0",
+                  "_model_name": "LayoutModel",
+                  "_view_count": null,
+                  "_view_module": "@jupyter-widgets/base",
+                  "_view_module_version": "2.0.0",
+                  "_view_name": "LayoutView",
+                  "align_content": null,
+                  "align_items": null,
+                  "align_self": null,
+                  "border_bottom": null,
+                  "border_left": null,
+                  "border_right": null,
+                  "border_top": null,
+                  "bottom": null,
+                  "display": null,
+                  "flex": null,
+                  "flex_flow": null,
+                  "grid_area": null,
+                  "grid_auto_columns": null,
+                  "grid_auto_flow": null,
+                  "grid_auto_rows": null,
+                  "grid_column": null,
+                  "grid_gap": null,
+                  "grid_row": null,
+                  "grid_template_areas": null,
+                  "grid_template_columns": null,
+                  "grid_template_rows": null,
+                  "height": null,
+                  "justify_content": null,
+                  "justify_items": null,
+                  "left": null,
+                  "margin": null,
+                  "max_height": null,
+                  "max_width": null,
+                  "min_height": null,
+                  "min_width": null,
+                  "object_fit": null,
+                  "object_position": null,
+                  "order": null,
+                  "overflow": null,
+                  "padding": null,
+                  "right": null,
+                  "top": null,
+                  "visibility": null,
+                  "width": null
+                }
+              },
+              "b1edb1573bcf4564992cfd4aa6aa8256": {
+                "model_module": "jupyter-leaflet",
+                "model_module_version": "^0.17",
+                "model_name": "LeafletMapStyleModel",
+                "state": {
+                  "_model_module": "jupyter-leaflet",
+                  "_model_module_version": "^0.17",
+                  "_model_name": "LeafletMapStyleModel",
+                  "_view_count": null,
+                  "_view_module": "@jupyter-widgets/base",
+                  "_view_module_version": "2.0.0",
+                  "_view_name": "StyleView",
+                  "cursor": "grab"
+                }
+              },
+              "c704a25a2f3e4bc4bbe97ef552331e40": {
+                "model_module": "jupyter-leaflet",
+                "model_module_version": "^0.17",
+                "model_name": "LeafletZoomControlModel",
+                "state": {
+                  "_model_module": "jupyter-leaflet",
+                  "_model_module_version": "^0.17",
+                  "_model_name": "LeafletZoomControlModel",
+                  "_view_count": null,
+                  "_view_module": "jupyter-leaflet",
+                  "_view_module_version": "^0.17",
+                  "_view_name": "LeafletZoomControlView",
+                  "options": [
+                    "position",
+                    "zoom_in_text",
+                    "zoom_in_title",
+                    "zoom_out_text",
+                    "zoom_out_title"
+                  ],
+                  "position": "topleft",
+                  "zoom_in_text": "+",
+                  "zoom_in_title": "Zoom in",
+                  "zoom_out_text": "-",
+                  "zoom_out_title": "Zoom out"
+                }
+              },
+              "db6e5038f1d44d0e8bb76f48761b0c45": {
+                "model_module": "jupyter-leaflet",
+                "model_module_version": "^0.17",
+                "model_name": "LeafletMapModel",
+                "state": {
+                  "_dom_classes": [],
+                  "_model_module": "jupyter-leaflet",
+                  "_model_module_version": "^0.17",
+                  "_model_name": "LeafletMapModel",
+                  "_view_count": null,
+                  "_view_module": "jupyter-leaflet",
+                  "_view_module_version": "^0.17",
+                  "_view_name": "LeafletMapView",
+                  "bottom": 0,
+                  "bounce_at_zoom_limits": true,
+                  "box_zoom": true,
+                  "center": [
+                    36.936622,
+                    42.118185
+                  ],
+                  "close_popup_on_click": true,
+                  "controls": [
+                    "IPY_MODEL_c704a25a2f3e4bc4bbe97ef552331e40",
+                    "IPY_MODEL_7ad903c990fc4e8385d86fc0e172c9e9"
+                  ],
+                  "crs": {
+                    "custom": false,
+                    "name": "EPSG3857"
+                  },
+                  "default_style": "IPY_MODEL_fc2d3a90a39441e98aa3e66eee79ce74",
+                  "double_click_zoom": true,
+                  "dragging": true,
+                  "dragging_style": "IPY_MODEL_71357d2b9c974188b40742fd740124b6",
+                  "east": 0,
+                  "fullscreen": false,
+                  "inertia": true,
+                  "inertia_deceleration": 3000,
+                  "inertia_max_speed": 1500,
+                  "interpolation": "bilinear",
+                  "keyboard": true,
+                  "keyboard_pan_offset": 80,
+                  "keyboard_zoom_offset": 1,
+                  "layers": [
+                    "IPY_MODEL_2b7e50ad261c4a0785dd63c865d68c0b"
+                  ],
+                  "layout": "IPY_MODEL_aac0c6970dba4f8391896f10d0fd1ab8",
+                  "left": 9007199254740991,
+                  "max_zoom": null,
+                  "min_zoom": null,
+                  "modisdate": "2023-02-15",
+                  "north": 0,
+                  "options": [
+                    "bounce_at_zoom_limits",
+                    "box_zoom",
+                    "center",
+                    "close_popup_on_click",
+                    "double_click_zoom",
+                    "dragging",
+                    "fullscreen",
+                    "inertia",
+                    "inertia_deceleration",
+                    "inertia_max_speed",
+                    "interpolation",
+                    "keyboard",
+                    "keyboard_pan_offset",
+                    "keyboard_zoom_offset",
+                    "max_zoom",
+                    "min_zoom",
+                    "prefer_canvas",
+                    "scroll_wheel_zoom",
+                    "tap",
+                    "tap_tolerance",
+                    "touch_zoom",
+                    "world_copy_jump",
+                    "zoom",
+                    "zoom_animation_threshold",
+                    "zoom_delta",
+                    "zoom_snap"
+                  ],
+                  "panes": {},
+                  "prefer_canvas": false,
+                  "right": 0,
+                  "scroll_wheel_zoom": false,
+                  "south": 0,
+                  "style": "IPY_MODEL_b1edb1573bcf4564992cfd4aa6aa8256",
+                  "tabbable": null,
+                  "tap": true,
+                  "tap_tolerance": 15,
+                  "tooltip": null,
+                  "top": 9007199254740991,
+                  "touch_zoom": true,
+                  "west": 0,
+                  "window_url": "",
+                  "world_copy_jump": false,
+                  "zoom": 14,
+                  "zoom_animation_threshold": 4,
+                  "zoom_delta": 1,
+                  "zoom_snap": 1
+                }
+              },
+              "fc2d3a90a39441e98aa3e66eee79ce74": {
+                "model_module": "jupyter-leaflet",
+                "model_module_version": "^0.17",
+                "model_name": "LeafletMapStyleModel",
+                "state": {
+                  "_model_module": "jupyter-leaflet",
+                  "_model_module_version": "^0.17",
+                  "_model_name": "LeafletMapStyleModel",
+                  "_view_count": null,
+                  "_view_module": "@jupyter-widgets/base",
+                  "_view_module_version": "2.0.0",
+                  "_view_name": "StyleView",
+                  "cursor": "grab"
+                }
+              }
+            },
+            "version_major": 2,
+            "version_minor": 0
+          }
+        }
+      ]
+    }
+  }
+}
