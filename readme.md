@@ -165,47 +165,6 @@ The table below reports the accuracy statistics for the PWTT algorithm in 12 cit
 Receiver-Operating Characteristic (ROC) curves for each country are also provided below.
 ![](figs/roc.png)
 
-## Country-Wide Damage Detection
-
-For large-scale analysis covering an entire country, the `process_country.py` script tiles the area using [H3 hexagonal cells](https://h3geo.org/), runs the PWTT on each cell, and exports damaged building footprints to Google Drive.
-
-```bash
-# Gaza
-python code/process_country.py \
-    --country "Palestine" \
-    --war-start 2023-10-10 \
-    --inference-start 2026-01-01 \
-    --footprints projects/sat-io/open-datasets/MSBuildings/Gaza_Strip \
-    --export-folder gaza_damage
-
-# Ukraine (prioritize Kyiv area)
-python code/process_country.py \
-    --country "Ukraine" \
-    --war-start 2022-02-22 \
-    --inference-start 2024-07-01 \
-    --footprints projects/sat-io/open-datasets/MSBuildings/Ukraine \
-    --export-folder ukraine_damage \
-    --priority-lat 50.45 --priority-lon 30.52
-```
-
-Key options:
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--country` | Country name as it appears in [FAO/GAUL](https://developers.google.com/earth-engine/datasets/catalog/FAO_GAUL_2015_level0) | required |
-| `--war-start` | Date hostilities began (YYYY-MM-DD) | required |
-| `--inference-start` | Start of inference window (YYYY-MM-DD) | required |
-| `--footprints` | GEE asset path for building footprints | required |
-| `--priority-lat/lon` | Process a priority area (e.g. capital) first | none |
-| `--h3-resolution` | H3 cell size (4 ≈ 1,000 km², 5 ≈ 250 km²) | 4 |
-| `--workers` | Parallel threads for GEE exports | 15 |
-| `--pre-interval` | Months of pre-war baseline | 12 |
-| `--post-interval` | Months of post-war imagery | 2 |
-| `--full-geometries` | Export full GeoJSON instead of centroid CSV | off |
-
-The script uses [Microsoft Building Footprints](https://planetarycomputer.microsoft.com/dataset/ms-buildings) (`projects/sat-io/open-datasets/MSBuildings/{Country}`) to sample the damage raster at the building level. Buildings with T > 3.3 are exported with their coordinates, T-statistic, area, and p-value. Results are exported as one CSV per H3 cell to the specified Google Drive folder.
-
-![](figs/gaza_damage_cumulative.gif)
 
 ## Citation
 

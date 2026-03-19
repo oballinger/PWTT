@@ -147,7 +147,7 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval):
     return change.addBands(p_values).addBands(pre_n.toFloat().rename('n_pre')).addBands(post_n.toFloat().rename('n_post'))
 
 
-def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False, export_dir='PWTT_Export', export_name=None, export_scale=10, grid_scale=500, export_grid=False):
+def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False, export_dir='PWTT_Export', export_name=None, export_scale=10, grid_scale=500, export_grid=False, clip=True):
     inference_start = ee.Date(inference_start)
     war_start = ee.Date(war_start)
 
@@ -193,7 +193,10 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
     p_value = p_value.multiply(n_orbits).min(ee.Image.constant(1)).rename('p_value')
 
     # Spatial smoothing applies only to t-values
-    t_smooth = max_change.focalMedian(10, 'gaussian', 'meters').clip(aoi).updateMask(urban.gt(0.1))
+    t_smooth = max_change.focalMedian(10, 'gaussian', 'meters')
+    if clip:
+        t_smooth = t_smooth.clip(aoi)
+    t_smooth = t_smooth.updateMask(urban.gt(0.1))
     k50 = t_smooth.convolve(ee.Kernel.circle(50, 'meters', True)).rename('k50')
     k100 = t_smooth.convolve(ee.Kernel.circle(100, 'meters', True)).rename('k100')
     k150 = t_smooth.convolve(ee.Kernel.circle(150, 'meters', True)).rename('k150')
@@ -202,10 +205,13 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
     T_statistic = (t_smooth.add(k50).add(k100).add(k150)).divide(4).rename('T_statistic')
 
     # Mask p-values with urban mask
-    p_value = p_value.clip(aoi).updateMask(urban.gt(0.1))
+    p_value = p_value.updateMask(urban.gt(0.1))
+    if clip:
+        p_value = p_value.clip(aoi)
 
     image = T_statistic.addBands(damage).addBands(p_value).addBands(n_pre).addBands(n_post).toFloat()
-    image = image.clip(aoi)
+    if clip:
+        image = image.clip(aoi)
 
     if export_grid:
         grid = aoi.geometry().bounds().coveringGrid('EPSG:3857', grid_scale)
