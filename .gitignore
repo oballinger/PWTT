@@ -2,3 +2,6 @@ data/
 code/*.ipynb
 website
 .DS_Store
+*.json
+*.tif
+*.zip

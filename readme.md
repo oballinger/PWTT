@@ -3,7 +3,7 @@
 <h1 align="center">Pixel-Wise T-Test</h1>
 <h2 align="center">A New Algorithm for Battle Damage Detection using Sentinel-1 Imagery </h2>
 
-[![](https://img.shields.io/badge/arXiv-paper-b31b1b.svg)](https://arxiv.org/pdf/2405.06323)  [![](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/oballinger/PWTT/blob/main/pwtt_quickstart.ipynb)   [![](https://img.shields.io/badge/Benchmark%20Dataset-8A2BE2)](https://drive.google.com/file/d/12RsrfU8m-cvtONohD6FBcF21OPoEA_Mf/view?usp=sharing)
+[![](https://img.shields.io/badge/-Elsevier-FF6C00?style=flat&logo=elsevier&logoColor=white)](https://www.sciencedirect.com/science/article/pii/S0034425725004298)  [![](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/oballinger/PWTT/blob/main/pwtt_quickstart.ipynb)   [![](https://img.shields.io/badge/Benchmark%20Dataset-8A2BE2)](https://drive.google.com/file/d/12RsrfU8m-cvtONohD6FBcF21OPoEA_Mf/view?usp=sharing)
 
 </div>
 
@@ -19,22 +19,24 @@ The PWTT utilizes Synthetic Aperture Radar imagery from the Sentinel-1 satellite
 
 The green dashed line and shaded area represent the pixel's mean backscatter amplitude $\pm$ 1 standard deviation prior to the invasion, while the red line and shaded area represent these statistics following the building's destruction.
 
+![](figs/gaza_damage_cumulative.gif)
+
 The diagram below displays the full PWTT process:
 
 ![](figs/flowchart.png)
 
 
-## Python Quickstart [![](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/oballinger/PWTT/blob/main/pwtt_quickstart.ipynb)
+## Installation
 
-
-First, clone the repository and navigate to the code directory 
-
-```python
-!git clone https://github.com/oballinger/PWTT
-!cd PWTT/code
+```bash
+pip install pwtt
 ```
 
-Then, import the Google Earth Engine python API and authenticate using your credentials and cloud project name. 
+This installs the `pwtt` package and its dependencies (`earthengine-api`, `geemap`).
+
+## Python Quickstart [![](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/oballinger/PWTT/blob/main/pwtt_quickstart.ipynb)
+
+First, import the Google Earth Engine python API and authenticate using your credentials and cloud project name.
 
 ```python
 import ee
@@ -45,12 +47,12 @@ ee.Authenticate()
 ee.Initialize(project=project_name)
 ```
 
-finally, the PWTT can be deployed in one line of code. The example below conducts a damage assessment over Gaza for July 2024.
+The PWTT can be deployed in one line of code. The example below conducts a damage assessment over Gaza for July 2024.
 
 ```python
 gaza = ee.Geometry.Rectangle([34.21,31.21,34.57,31.60])
 
-pwtt.filter_s1(aoi=gaza, # the area of interest as a bounding box
+pwtt.detect_damage(aoi=gaza, # the area of interest as a bounding box
                    war_start='2023-10-10', # the start of the war
                    inference_start='2024-07-01', # the beginning of the inference window
                    pre_interval=12, # the number of months before the war to use as a reference period 
@@ -63,7 +65,7 @@ By simply modifying the location, war_start date and inference_start dates, dama
 ```python
 bakhmut = ee.Geometry.Rectangle([37.949421, 48.556181, 38.043834, 48.621584])
 
-pwtt.filter_s1(aoi=bakhmut,
+pwtt.detect_damage(aoi=bakhmut,
                    war_start='2022-02-22',
                    inference_start='2024-07-01',
                    pre_interval=12,

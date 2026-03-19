@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pwtt"
+version = "0.1.0"
+description = "Pixel-Wise T-Test: Battle damage detection using Sentinel-1 SAR imagery"
+readme = "readme.md"
+license = "MIT"
+requires-python = ">=3.8"
+authors = [
+    { name = "Ollie Ballinger" },
+]
+keywords = ["SAR", "Sentinel-1", "damage-detection", "remote-sensing", "Google-Earth-Engine"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "earthengine-api",
+    "geemap",
+]
+
+[project.urls]
+Homepage = "https://github.com/oballinger/PWTT"
+Paper = "https://www.sciencedirect.com/science/article/pii/S0034425725004298"
+
+[tool.setuptools.packages.find]
+include = ["pwtt*"]
