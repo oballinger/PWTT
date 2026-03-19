@@ -19,13 +19,6 @@ The PWTT utilizes Synthetic Aperture Radar imagery from the Sentinel-1 satellite
 
 The green dashed line and shaded area represent the pixel's mean backscatter amplitude $\pm$ 1 standard deviation prior to the invasion, while the red line and shaded area represent these statistics following the building's destruction.
 
-![](figs/gaza_damage_cumulative.gif)
-
-The diagram below displays the full PWTT process:
-
-![](figs/flowchart.png)
-
-
 ## Installation
 
 ```bash
@@ -212,6 +205,8 @@ Key options:
 
 The script uses [Microsoft Building Footprints](https://planetarycomputer.microsoft.com/dataset/ms-buildings) (`projects/sat-io/open-datasets/MSBuildings/{Country}`) to sample the damage raster at the building level. Buildings with T > 3.3 are exported with their coordinates, T-statistic, area, and p-value. Results are exported as one CSV per H3 cell to the specified Google Drive folder.
 
+![](figs/gaza_damage_cumulative.gif)
+
 ## Citation
 
 ```bibtex
@@ -226,3 +221,7 @@ The script uses [Microsoft Building Footprints](https://planetarycomputer.micros
   doi={10.1016/j.rse.2025.115025}
 }
 ```
+
+The diagram below displays the full PWTT process:
+
+![](figs/flowchart.png)
