@@ -3,7 +3,7 @@
 <h1 align="center">Pixel-Wise T-Test</h1>
 <h2 align="center">A New Algorithm for Battle Damage Detection using Sentinel-1 Imagery </h2>
 
-[![](https://img.shields.io/badge/-Elsevier-FF6C00?style=flat&logo=elsevier&logoColor=white)](https://www.sciencedirect.com/science/article/pii/S0034425725004298)  [![](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/oballinger/PWTT/blob/main/pwtt_quickstart.ipynb)   [![](https://img.shields.io/badge/Benchmark%20Dataset-8A2BE2)](https://drive.google.com/file/d/12RsrfU8m-cvtONohD6FBcF21OPoEA_Mf/view?usp=sharing)
+[![](https://img.shields.io/badge/-Elsevier-FF6C00?style=flat&logo=elsevier&logoColor=white)](https://www.sciencedirect.com/science/article/pii/S0034425725004298)  [![](https://img.shields.io/pypi/v/pwtt?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pwtt/)  [![](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/oballinger/PWTT/blob/main/pwtt_quickstart.ipynb)   [![](https://img.shields.io/badge/Benchmark%20Dataset-8A2BE2)](https://drive.google.com/file/d/12RsrfU8m-cvtONohD6FBcF21OPoEA_Mf/view?usp=sharing)
 
 </div>
 
@@ -72,6 +72,34 @@ pwtt.detect_damage(aoi=bakhmut,
                    post_interval=1,
                    viz=True)
 ```
+## Choosing a Threshold
+
+The `detect_damage` function returns a continuous `T_statistic` band and a binary `damage` band (default threshold T > 3.3). The choice of threshold controls the precision-recall tradeoff and should be guided by the use case. The figure below shows how precision, recall, and F1 vary across thresholds, using UNOSAT-labeled building footprints from Gaza and Ukraine(click for interactive version).
+
+[![](figs/threshold_curves_one_month.png)](https://oballinger.github.io/PWTT/threshold_curves_one_month.html)
+*1-month inference window ([interactive](https://oballinger.github.io/PWTT/threshold_curves_one_month.html))*
+
+### Recommended thresholds
+
+| Threshold | Precision | Recall | F1 | Use case |
+|-----------|-----------|--------|-----|----------|
+| T > 2 | 39.2% | 97.6% | 55.9% | Maximum sensitivity / screening. Useful when missing damage is more costly than false alarms. |
+| T > 3.3 | 70.0% | 82.4% | 75.7% | **Balanced (default)**. Good tradeoff between precision and recall across most cities. |
+| T > 4 | 77.7% | 62.8% | 69.5% | High confidence. Fewer false positives, but misses less severe damage. |
+| T > 5 | 82.4% | 31.9% | 46.0% | Very high confidence. Detects only the most severe damage. |
+
+### Precision-recall considerations
+
+**Precision** is the fraction of buildings flagged as damaged that are actually damaged (i.e. how trustworthy is a positive prediction). **Recall** is the fraction of actually damaged buildings that the algorithm successfully detects (i.e. how much damage does it miss). Raising the threshold increases precision but decreases recall; lowering it does the opposite.
+
+Precision and recall vary significantly across cities, largely driven by the **proportion of damaged buildings** (class imbalance). In cities with low damage rates, even a highly discriminative model produces low precision because the vast majority of buildings are undamaged. AUC is the best metric for comparing algorithm performance across cities as it is insensitive to class imbalance.
+
+**IMPORTANT:** This algorithm measures significant changes in urban environments following the onset of conflict. It remains an *assumption* that this change corresponds to damage. 
+
+- **Damage counts and humanitarian response**: use the default threshold (T > 3.3). The algorithm tends toward higher recall than precision, meaning it is more likely to over-count than under-count.
+- **High-precision applications** (e.g. legal evidence, journalism): raise the threshold to T > 4 or higher to minimize false positives.
+- **Rapid response / early warning**: lower the threshold to T > 2 for maximum coverage. The algorithm works with as few as one post-event image, with approximately a 6% reduction in AUC compared to a 1-month window.
+- **Aggregate statistics**: even when building-level precision is moderate, aggregate damage counts at the neighborhood or city level are robust due to error cancellation.
 
 ## Validation Data 
 
@@ -141,5 +169,60 @@ The table below reports the accuracy statistics for the PWTT algorithm in 12 cit
 | **All**   | **All**            | 84.17 | 76.4     | 58.2  | 48.04     | 73.82  | 873072  |
 
 
-Reciever-Operating Characteristic (ROC) curves for each country are also provided below.
+Receiver-Operating Characteristic (ROC) curves for each country are also provided below.
 ![](figs/roc.png)
+
+## Country-Wide Damage Detection
+
+For large-scale analysis covering an entire country, the `process_country.py` script tiles the area using [H3 hexagonal cells](https://h3geo.org/), runs the PWTT on each cell, and exports damaged building footprints to Google Drive.
+
+```bash
+# Gaza
+python code/process_country.py \
+    --country "Palestine" \
+    --war-start 2023-10-10 \
+    --inference-start 2026-01-01 \
+    --footprints projects/sat-io/open-datasets/MSBuildings/Gaza_Strip \
+    --export-folder gaza_damage
+
+# Ukraine (prioritize Kyiv area)
+python code/process_country.py \
+    --country "Ukraine" \
+    --war-start 2022-02-22 \
+    --inference-start 2024-07-01 \
+    --footprints projects/sat-io/open-datasets/MSBuildings/Ukraine \
+    --export-folder ukraine_damage \
+    --priority-lat 50.45 --priority-lon 30.52
+```
+
+Key options:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--country` | Country name as it appears in [FAO/GAUL](https://developers.google.com/earth-engine/datasets/catalog/FAO_GAUL_2015_level0) | required |
+| `--war-start` | Date hostilities began (YYYY-MM-DD) | required |
+| `--inference-start` | Start of inference window (YYYY-MM-DD) | required |
+| `--footprints` | GEE asset path for building footprints | required |
+| `--priority-lat/lon` | Process a priority area (e.g. capital) first | none |
+| `--h3-resolution` | H3 cell size (4 ≈ 1,000 km², 5 ≈ 250 km²) | 4 |
+| `--workers` | Parallel threads for GEE exports | 15 |
+| `--pre-interval` | Months of pre-war baseline | 12 |
+| `--post-interval` | Months of post-war imagery | 2 |
+| `--full-geometries` | Export full GeoJSON instead of centroid CSV | off |
+
+The script uses [Microsoft Building Footprints](https://planetarycomputer.microsoft.com/dataset/ms-buildings) (`projects/sat-io/open-datasets/MSBuildings/{Country}`) to sample the damage raster at the building level. Buildings with T > 3.3 are exported with their coordinates, T-statistic, area, and p-value. Results are exported as one CSV per H3 cell to the specified Google Drive folder.
+
+## Citation
+
+```bibtex
+@article{ballinger2025pwtt,
+  title={Open access battle damage detection via Pixel-Wise T-Test on Sentinel-1 imagery},
+  author={Ballinger, Ollie},
+  journal={Remote Sensing of Environment},
+  volume={331},
+  pages={115025},
+  year={2025},
+  publisher={Elsevier},
+  doi={10.1016/j.rse.2025.115025}
+}
+```

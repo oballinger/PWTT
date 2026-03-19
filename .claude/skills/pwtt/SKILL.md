@@ -109,7 +109,7 @@ Key features:
 - Uses H3 hexagonal grid cells to partition the country
 - Processes cells in parallel with `ThreadPoolExecutor` (`--workers`)
 - `--priority-lat`/`--priority-lon` processes a priority area (e.g. capital) first
-- Exports damaged buildings (T_statistic > 3) to Google Drive
+- Exports damaged buildings (T_statistic > 3.3) to Google Drive
 - `--centroids-only` (default) for lightweight CSV export, `--full-geometries` for GeoJSON
 - Configurable H3 resolution (`--h3-resolution`, default 4 ~1000 km²)
 
@@ -120,7 +120,7 @@ Key features:
 
 ### Interpreting results
 - `T_statistic`: continuous damage probability score. Higher = more likely damaged.
-- `damage`: binary band (T > 3 by default)
+- `damage`: binary band (T > 3.3 by default)
 - T > 2.7 at n=40: statistically significant at 99% confidence
 - T > 3.2: recommended threshold for binary classification
 - T > 4: high confidence damage (used in iran.py for filtering)

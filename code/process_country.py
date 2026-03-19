@@ -80,7 +80,7 @@ def process_cell(h3_index, footprints_asset, war_start, inference_start,
         tileScale=8,
     )
 
-    damaged = fp_sample.filter(ee.Filter.gt('T_statistic', 3))
+    damaged = fp_sample.filter(ee.Filter.gt('T_statistic', 3.3))
 
     if centroids_only:
         def to_centroid(f):

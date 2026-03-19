@@ -198,7 +198,7 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
     k100 = t_smooth.convolve(ee.Kernel.circle(100, 'meters', True)).rename('k100')
     k150 = t_smooth.convolve(ee.Kernel.circle(150, 'meters', True)).rename('k150')
 
-    damage = t_smooth.gt(3).rename('damage')
+    damage = t_smooth.gt(3.3).rename('damage')
     T_statistic = (t_smooth.add(k50).add(k100).add(k150)).divide(4).rename('T_statistic')
 
     # Mask p-values with urban mask
