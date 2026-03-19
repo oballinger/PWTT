@@ -7,3 +7,4 @@ website
 *.zip
 countrywide.md
 code/process_country.py
+.claude
