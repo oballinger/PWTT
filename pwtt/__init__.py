@@ -143,11 +143,56 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval):
     # Compute two-tailed p-values (normal approx, valid for df > 30)
     p_values = two_tailed_pvalue(change).rename(['VV_pvalue', 'VH_pvalue'])
 
+    # Mask out pixels with insufficient pre-event observations
+    valid_mask = pre_n.gte(3)
+    change = change.updateMask(valid_mask)
+    p_values = p_values.updateMask(valid_mask)
+
     # Return t-values, p-values, and sample sizes
     return change.addBands(p_values).addBands(pre_n.toFloat().rename('n_pre')).addBands(post_n.toFloat().rename('n_post'))
 
 
-def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False, export_dir='PWTT_Export', export_name=None, export_scale=10, grid_scale=500, export_grid=False, clip=True):
+def ztest(s1, inference_start, war_start, pre_interval):
+    """Z-test: compare the single latest post-event image to the pre-war baseline.
+    z = |x_latest - mean_pre| / sd_pre, per pixel.
+    """
+    inference_start = ee.Date(inference_start)
+
+    pre = s1.filterDate(
+        war_start.advance(ee.Number(pre_interval).multiply(-1), "month"),
+        war_start
+    )
+
+    pre_mean = pre.mean()
+    pre_sd = pre.reduce(ee.Reducer.stdDev())
+    pre_n = pre.select('VV').count()
+
+    # Latest single image after inference_start
+    post = s1.filterDate(inference_start, ee.Date('2099-01-01'))
+    # Use mosaic() which returns a masked image if the collection is empty,
+    # avoiding the "no bands" error from .first() on an empty collection
+    latest = post.sort('system:time_start', False).mosaic()
+
+    z_vv = latest.select('VV').subtract(pre_mean.select('VV')) \
+        .divide(pre_sd.select('VV_stdDev')).abs().rename('VV')
+    z_vh = latest.select('VH').subtract(pre_mean.select('VH')) \
+        .divide(pre_sd.select('VH_stdDev')).abs().rename('VH')
+
+    p_vv = two_tailed_pvalue(z_vv).rename('VV_pvalue')
+    p_vh = two_tailed_pvalue(z_vh).rename('VH_pvalue')
+
+    valid_mask = pre_n.gte(3)
+    z_vv = z_vv.updateMask(valid_mask)
+    z_vh = z_vh.updateMask(valid_mask)
+    p_vv = p_vv.updateMask(valid_mask)
+    p_vh = p_vh.updateMask(valid_mask)
+
+    return z_vv.addBands(z_vh).addBands(p_vv).addBands(p_vh) \
+        .addBands(pre_n.toFloat().rename('n_pre')) \
+        .addBands(ee.Image.constant(1).toFloat().rename('n_post'))
+
+
+def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False, export_dir='PWTT_Export', export_name=None, export_scale=10, grid_scale=500, export_grid=False, clip=True, method='stouffer'):
     inference_start = ee.Date(inference_start)
     war_start = ee.Date(war_start)
 
@@ -159,50 +204,99 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
         .aggregate_array('relativeOrbitNumber_start') \
         .distinct()
 
-    def map_orbit(orbit):
-        s1 = ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
+    def make_orbit_s1(orbit):
+        return ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
             .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")) \
             .filter(ee.Filter.eq("instrumentMode", "IW")) \
             .filter(ee.Filter.eq("relativeOrbitNumber_start", orbit)) \
             .map(lee_filter) \
-            .select(['VV', 'VH'])\
-            .map(lambda image: image.log())\
-            .filterBounds(aoi) \
+            .select(['VV', 'VH']) \
+            .map(lambda image: image.log()) \
+            .filterBounds(aoi)
 
-        image = ttest(s1, inference_start, war_start, pre_interval, post_interval)
-        return image
+    # Fallback image for orbits with no coverage — all bands present but fully masked
+    empty_orbit = ee.Image.constant([0, 0, 0, 0, 0, 0]).rename(
+        ['VV', 'VH', 'VV_pvalue', 'VH_pvalue', 'n_pre', 'n_post']
+    ).updateMask(ee.Image.constant(0)).toFloat()
+
+    def map_orbit_ttest(orbit):
+        s1 = make_orbit_s1(orbit)
+        result = ttest(s1, inference_start, war_start, pre_interval, post_interval)
+        return ee.Image(ee.Algorithms.If(result.bandNames().size().gt(0), result, empty_orbit))
+
+    def map_orbit_ztest(orbit):
+        s1 = make_orbit_s1(orbit)
+        result = ztest(s1, inference_start, war_start, pre_interval)
+        return ee.Image(ee.Algorithms.If(result.bandNames().size().gt(0), result, empty_orbit))
 
     urban = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1').filterDate(
         war_start.advance(-1 * pre_interval, 'months'), war_start).select('built').mean()
 
-    orbit_images = ee.ImageCollection(orbits.map(map_orbit))
-    # Max t-value across orbits; min p-value across orbits; max sample sizes
-    t_max = orbit_images.select(['VV', 'VH']).max()
-    p_min = orbit_images.select(['VV_pvalue', 'VH_pvalue']).min()
-    n_pre = orbit_images.select('n_pre').max()
-    n_post = orbit_images.select('n_post').max()
-    image = t_max.addBands(p_min)
+    if method == 'ztest':
+        orbit_images = ee.ImageCollection(orbits.map(map_orbit_ztest))
+    else:
+        orbit_images = ee.ImageCollection(orbits.map(map_orbit_ttest))
 
-    # Combine polarizations: max t-value, min p-value
-    max_change = image.select('VV').max(image.select('VH')).rename('max_change')
-    p_value = image.select('VV_pvalue').min(image.select('VH_pvalue')).rename('p_value')
-    image = max_change.addBands(p_value)
+    if method == 'stouffer':
+        # Stouffer's weighted Z-score: weight each orbit by sqrt(df) where
+        # df = n_pre + n_post - 2. Combined Z = sum(w*t)/sqrt(sum(w²)) is
+        # standard normal under H0 — doesn't inflate with more orbits.
+        def add_stouffer_bands(img):
+            df = img.select('n_pre').add(img.select('n_post')).subtract(2)
+            w = df.sqrt()
+            return img.addBands(img.select('VV').multiply(w).rename('w_VV')) \
+                      .addBands(img.select('VH').multiply(w).rename('w_VH')) \
+                      .addBands(df.rename('w_sq'))
 
-    # Bonferroni correction: multiply p-value by number of orbits, cap at 1
-    n_orbits = orbits.size()
-    p_value = p_value.multiply(n_orbits).min(ee.Image.constant(1)).rename('p_value')
+        orbit_images = orbit_images.map(add_stouffer_bands)
+        sum_w_sq = orbit_images.select('w_sq').sum()
+        z_vv = orbit_images.select('w_VV').sum().divide(sum_w_sq.sqrt()).rename('VV')
+        z_vh = orbit_images.select('w_VH').sum().divide(sum_w_sq.sqrt()).rename('VH')
+
+        max_change = z_vv.max(z_vh).rename('max_change')
+        # P-value from combined Z; ×2 for VV/VH max (Bonferroni for 2 tests)
+        p_value = two_tailed_pvalue(max_change).multiply(2) \
+            .min(ee.Image.constant(1)).rename('p_value')
+        n_pre = orbit_images.select('n_pre').sum()
+        n_post = orbit_images.select('n_post').sum()
+
+    elif method in ('max', 'ztest'):
+        # max t-value (or z-value) across orbits, min p-value, Bonferroni
+        t_max = orbit_images.select(['VV', 'VH']).max()
+        p_min = orbit_images.select(['VV_pvalue', 'VH_pvalue']).min()
+        n_pre = orbit_images.select('n_pre').max()
+        n_post = orbit_images.select('n_post').max()
+        image = t_max.addBands(p_min)
+
+        max_change = image.select('VV').max(image.select('VH')).rename('max_change')
+        p_value = image.select('VV_pvalue').min(image.select('VH_pvalue')).rename('p_value')
+        n_orbits = orbits.size()
+        p_value = p_value.multiply(n_orbits).min(ee.Image.constant(1)).rename('p_value')
+
+    else:
+        raise ValueError(f"method must be 'stouffer', 'max', or 'ztest', got '{method}'")
+
+    # Build a fully-masked empty image as fallback for areas with no S1 coverage
+    empty = ee.Image.constant([0, 0, 1, 0, 0]).rename(
+        ['T_statistic', 'damage', 'p_value', 'n_pre', 'n_post']
+    ).updateMask(ee.Image.constant(0)).toFloat()
+
+    # Constrain to areas with valid raw data before smoothing
+    raw_data_mask = max_change.mask()
 
     # Spatial smoothing applies only to t-values
     t_smooth = max_change.focalMedian(10, 'gaussian', 'meters')
     if clip:
         t_smooth = t_smooth.clip(aoi)
-    t_smooth = t_smooth.updateMask(urban.gt(0.1))
+    t_smooth = t_smooth.updateMask(urban.gt(0.1)).updateMask(raw_data_mask)
     k50 = t_smooth.convolve(ee.Kernel.circle(50, 'meters', True)).rename('k50')
     k100 = t_smooth.convolve(ee.Kernel.circle(100, 'meters', True)).rename('k100')
     k150 = t_smooth.convolve(ee.Kernel.circle(150, 'meters', True)).rename('k150')
 
     damage = t_smooth.gt(3.3).rename('damage')
     T_statistic = (t_smooth.add(k50).add(k100).add(k150)).divide(4).rename('T_statistic')
+    # Re-apply raw data mask so T_statistic doesn't extend beyond where n_post is valid
+    T_statistic = T_statistic.updateMask(raw_data_mask)
 
     # Mask p-values with urban mask
     p_value = p_value.updateMask(urban.gt(0.1))
@@ -210,6 +304,9 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
         p_value = p_value.clip(aoi)
 
     image = T_statistic.addBands(damage).addBands(p_value).addBands(n_pre).addBands(n_post).toFloat()
+
+    # If no orbits had coverage, return the empty fallback
+    image = ee.Image(ee.Algorithms.If(orbits.size().gt(0), image, empty))
     if clip:
         image = image.clip(aoi)
 
