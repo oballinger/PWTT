@@ -20,6 +20,7 @@ import geemap
 
 
 __version__ = "0.1.0"
+__all__ = ['detect_damage', 'lee_filter', 'ttest', 'ztest', 'hotelling_t2', 'terrain_flattening', '__version__']
 
 
 def normal_cdf_approx(x_image):
@@ -102,54 +103,66 @@ def lee_filter(image):
     return image.addBands(output, None, True)
 
 
-def ttest(s1, inference_start, war_start, pre_interval, post_interval):
-    # Convert the inference_start date to a date object
+def ttest(s1, inference_start, war_start, pre_interval, post_interval, ttest_type='welch'):
     inference_start = ee.Date(inference_start)
 
-    # Filter the image collection to the pre-event period
+    # Filter to pre-event and post-event periods
     pre = s1.filterDate(
         war_start.advance(ee.Number(pre_interval).multiply(-1), "month"),
         war_start
     )
-
-    # Filter the image collection to the post-event period
     post = s1.filterDate(inference_start, inference_start.advance(post_interval, "month"))
 
-    # Calculate the mean, standard deviation, and number of images for the pre-event period
+    # Per-period statistics
     pre_mean = pre.mean()
     pre_sd = pre.reduce(ee.Reducer.stdDev())
     pre_n = pre.select('VV').count()
 
-    # Calculate the mean, standard deviation, and number of images for the post-event period
     post_mean = post.mean()
     post_sd = post.reduce(ee.Reducer.stdDev())
     post_n = post.select('VV').count()
 
-    # Calculate the pooled standard deviation
-    pooled_sd = (pre_sd.pow(2)
-                 .multiply(pre_n.subtract(1))
-                 .add(post_sd.pow(2).multiply(post_n.subtract(1)))).divide(pre_n.add(post_n).subtract(2)).sqrt()
+    if ttest_type == 'welch':
+        # Welch's t-test: does not assume equal variance
+        var_pre_n = pre_sd.pow(2).divide(pre_n)
+        var_post_n = post_sd.pow(2).divide(post_n)
+        sum_var = var_pre_n.add(var_post_n)
+        denom = sum_var.sqrt()
 
-    # Calculate the denominator of the t-test
-    denom = pooled_sd.multiply(
-        ee.Image(1).divide(pre_n).add(ee.Image(1).divide(post_n)).sqrt()
-    )
+        # Welch-Satterthwaite degrees of freedom (per pixel, per band)
+        df = sum_var.pow(2).divide(
+            var_pre_n.pow(2).divide(pre_n.subtract(1))
+            .add(var_post_n.pow(2).divide(post_n.subtract(1)))
+        )
+    else:
+        # Pooled t-test (original): assumes equal variance
+        pooled_sd = (pre_sd.pow(2)
+                     .multiply(pre_n.subtract(1))
+                     .add(post_sd.pow(2).multiply(post_n.subtract(1)))) \
+            .divide(pre_n.add(post_n).subtract(2)).sqrt()
+        denom = pooled_sd.multiply(
+            ee.Image(1).divide(pre_n).add(ee.Image(1).divide(post_n)).sqrt()
+        )
+        # Pooled df is scalar per pixel (same for VV and VH)
+        pooled_df = pre_n.add(post_n).subtract(2)
+        df = pooled_df.addBands(pooled_df)
 
-    # Calculate the Degrees of Freedom, which is the number of observations minus 2
-    df = pre_n.add(post_n).subtract(2)
-    # Calculate the t-test using the mean of the pre-event period, the mean of the post-event period, and the pooled standard deviation
     change = post_mean.subtract(pre_mean).divide(denom).abs()
 
     # Compute two-tailed p-values (normal approx, valid for df > 30)
     p_values = two_tailed_pvalue(change).rename(['VV_pvalue', 'VH_pvalue'])
 
-    # Mask out pixels with insufficient pre-event observations
-    valid_mask = pre_n.gte(3)
+    # Rename df bands for downstream use (Stouffer weighting)
+    df = df.rename(['df_VV', 'df_VH'])
+
+    # Mask out pixels with insufficient observations
+    valid_mask = pre_n.gte(3).And(post_n.gte(2))
     change = change.updateMask(valid_mask)
     p_values = p_values.updateMask(valid_mask)
+    df = df.updateMask(valid_mask)
 
-    # Return t-values, p-values, and sample sizes
-    return change.addBands(p_values).addBands(pre_n.toFloat().rename('n_pre')).addBands(post_n.toFloat().rename('n_post'))
+    return change.addBands(p_values).addBands(pre_n.toFloat().rename('n_pre')) \
+        .addBands(post_n.toFloat().rename('n_post')).addBands(df.toFloat())
 
 
 def ztest(s1, inference_start, war_start, pre_interval):
@@ -169,8 +182,6 @@ def ztest(s1, inference_start, war_start, pre_interval):
 
     # Latest single image after inference_start
     post = s1.filterDate(inference_start, ee.Date('2099-01-01'))
-    # Use mosaic() which returns a masked image if the collection is empty,
-    # avoiding the "no bands" error from .first() on an empty collection
     latest = post.sort('system:time_start', False).mosaic()
 
     z_vv = latest.select('VV').subtract(pre_mean.select('VV')) \
@@ -187,12 +198,120 @@ def ztest(s1, inference_start, war_start, pre_interval):
     p_vv = p_vv.updateMask(valid_mask)
     p_vh = p_vh.updateMask(valid_mask)
 
+    # df bands: z-test has no meaningful df, use pre_n as placeholder for Stouffer weight
+    df_vv = pre_n.toFloat().rename('df_VV')
+    df_vh = pre_n.toFloat().rename('df_VH')
+
     return z_vv.addBands(z_vh).addBands(p_vv).addBands(p_vh) \
         .addBands(pre_n.toFloat().rename('n_pre')) \
-        .addBands(ee.Image.constant(1).toFloat().rename('n_post'))
+        .addBands(ee.Image.constant(1).toFloat().rename('n_post')) \
+        .addBands(df_vv).addBands(df_vh)
 
 
-def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False, export_dir='PWTT_Export', export_name=None, export_scale=10, grid_scale=500, export_grid=False, clip=True, method='stouffer'):
+def hotelling_t2(s1, inference_start, war_start, pre_interval, post_interval, ttest_type='welch'):
+    """Hotelling's T-squared: joint multivariate test on VV and VH.
+    Uses closed-form 2x2 inverse of pooled covariance matrix.
+    Output: sqrt(T2) in both VV and VH bands for compatibility with downstream max(VV,VH).
+    """
+    inference_start = ee.Date(inference_start)
+
+    pre = s1.filterDate(
+        war_start.advance(ee.Number(pre_interval).multiply(-1), "month"),
+        war_start
+    )
+    post = s1.filterDate(inference_start, inference_start.advance(post_interval, "month"))
+
+    pre_mean = pre.mean()
+    post_mean = post.mean()
+    pre_n = pre.select('VV').count()
+    post_n = post.select('VV').count()
+
+    # Per-pixel variances
+    pre_sd = pre.reduce(ee.Reducer.stdDev())
+    post_sd = post.reduce(ee.Reducer.stdDev())
+    pre_var_vv = pre_sd.select('VV_stdDev').pow(2)
+    pre_var_vh = pre_sd.select('VH_stdDev').pow(2)
+    post_var_vv = post_sd.select('VV_stdDev').pow(2)
+    post_var_vh = post_sd.select('VH_stdDev').pow(2)
+
+    # Per-pixel cross-covariance: cov(VV, VH) = E[(VV-mu_VV)(VH-mu_VH)]
+    pre_cov = pre.map(lambda img:
+        img.select('VV').subtract(pre_mean.select('VV'))
+        .multiply(img.select('VH').subtract(pre_mean.select('VH')))
+        .rename('cov')
+    ).mean().multiply(pre_n).divide(pre_n.subtract(1))  # Bessel correction
+
+    post_cov = post.map(lambda img:
+        img.select('VV').subtract(post_mean.select('VV'))
+        .multiply(img.select('VH').subtract(post_mean.select('VH')))
+        .rename('cov')
+    ).mean().multiply(post_n).divide(post_n.subtract(1))  # Bessel correction
+
+    # Pooled covariance matrix elements: S_pooled = ((n1-1)*S1 + (n2-1)*S2) / (n1+n2-2)
+    denom_pool = pre_n.add(post_n).subtract(2)
+    s11 = pre_var_vv.multiply(pre_n.subtract(1)).add(post_var_vv.multiply(post_n.subtract(1))).divide(denom_pool)
+    s22 = pre_var_vh.multiply(pre_n.subtract(1)).add(post_var_vh.multiply(post_n.subtract(1))).divide(denom_pool)
+    s12 = pre_cov.multiply(pre_n.subtract(1)).add(post_cov.multiply(post_n.subtract(1))).divide(denom_pool)
+
+    # Determinant with epsilon floor
+    det = s11.multiply(s22).subtract(s12.pow(2)).max(ee.Image.constant(1e-10))
+
+    # Mean differences
+    d_vv = post_mean.select('VV').subtract(pre_mean.select('VV'))
+    d_vh = post_mean.select('VH').subtract(pre_mean.select('VH'))
+
+    # T² = (n1*n2/(n1+n2)) * d' * S_pooled^{-1} * d
+    # For 2x2: d'*S^{-1}*d = (d_vv²*s22 - 2*d_vv*d_vh*s12 + d_vh²*s11) / det
+    quad_form = d_vv.pow(2).multiply(s22) \
+        .subtract(d_vv.multiply(d_vh).multiply(s12).multiply(2)) \
+        .add(d_vh.pow(2).multiply(s11)) \
+        .divide(det)
+    t2 = pre_n.multiply(post_n).divide(pre_n.add(post_n)).multiply(quad_form)
+
+    # P-value: chi-squared(2) approximation — p = exp(-T²/2)
+    p_value = t2.multiply(-0.5).exp().max(ee.Image.constant(1e-10))
+
+    # Output sqrt(T²) as test statistic
+    t_stat = t2.sqrt()
+    change_vv = t_stat.rename('VV')
+    change_vh = t_stat.rename('VH')  # same value in both bands
+    p_vv = p_value.rename('VV_pvalue')
+    p_vh = p_value.rename('VH_pvalue')
+
+    # Degrees of freedom: use combined n for Stouffer weighting
+    combined_df = pre_n.add(post_n).subtract(2).toFloat()
+    df_vv = combined_df.rename('df_VV')
+    df_vh = combined_df.rename('df_VH')
+
+    # Valid mask: need enough observations for covariance estimation
+    valid_mask = pre_n.gte(3).And(post_n.gte(2))
+    change_vv = change_vv.updateMask(valid_mask)
+    change_vh = change_vh.updateMask(valid_mask)
+    p_vv = p_vv.updateMask(valid_mask)
+    p_vh = p_vh.updateMask(valid_mask)
+
+    return change_vv.addBands(change_vh).addBands(p_vv).addBands(p_vh) \
+        .addBands(pre_n.toFloat().rename('n_pre')) \
+        .addBands(post_n.toFloat().rename('n_post')) \
+        .addBands(df_vv).addBands(df_vh)
+
+
+def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False, export_dir='PWTT_Export', export_name=None, export_scale=10, grid_scale=500, export_grid=False, clip=True, method='stouffer', threshold=3.3, ttest_type='welch', smoothing='default', mask_before_smooth=True, lee_mode='per_image'):
+    import warnings
+
+    if (export or export_grid) and export_name is None:
+        raise ValueError("export_name is required when export=True or export_grid=True")
+
+    # Warn if inference_start is before war_start (likely a mistake)
+    if isinstance(inference_start, str) and isinstance(war_start, str):
+        inf = datetime.datetime.strptime(inference_start, '%Y-%m-%d')
+        war = datetime.datetime.strptime(war_start, '%Y-%m-%d')
+        if inf < war:
+            warnings.warn(
+                f"inference_start ({inference_start}) is before war_start ({war_start}). "
+                "The post-war period will use pre-war imagery."
+            )
+
     inference_start = ee.Date(inference_start)
     war_start = ee.Date(war_start)
 
@@ -205,23 +324,23 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
         .distinct()
 
     def make_orbit_s1(orbit):
-        return ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
+        s1 = ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
             .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")) \
             .filter(ee.Filter.eq("instrumentMode", "IW")) \
             .filter(ee.Filter.eq("relativeOrbitNumber_start", orbit)) \
-            .map(lee_filter) \
-            .select(['VV', 'VH']) \
-            .map(lambda image: image.log()) \
             .filterBounds(aoi)
+        if lee_mode == 'per_image':
+            s1 = s1.map(lee_filter)
+        return s1.select(['VV', 'VH']).map(lambda image: image.log())
 
     # Fallback image for orbits with no coverage — all bands present but fully masked
-    empty_orbit = ee.Image.constant([0, 0, 0, 0, 0, 0]).rename(
-        ['VV', 'VH', 'VV_pvalue', 'VH_pvalue', 'n_pre', 'n_post']
+    empty_orbit = ee.Image.constant([0, 0, 0, 0, 0, 0, 0, 0]).rename(
+        ['VV', 'VH', 'VV_pvalue', 'VH_pvalue', 'n_pre', 'n_post', 'df_VV', 'df_VH']
     ).updateMask(ee.Image.constant(0)).toFloat()
 
     def map_orbit_ttest(orbit):
         s1 = make_orbit_s1(orbit)
-        result = ttest(s1, inference_start, war_start, pre_interval, post_interval)
+        result = ttest(s1, inference_start, war_start, pre_interval, post_interval, ttest_type=ttest_type)
         return ee.Image(ee.Algorithms.If(result.bandNames().size().gt(0), result, empty_orbit))
 
     def map_orbit_ztest(orbit):
@@ -232,78 +351,221 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
     urban = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1').filterDate(
         war_start.advance(-1 * pre_interval, 'months'), war_start).select('built').mean()
 
-    if method == 'ztest':
-        orbit_images = ee.ImageCollection(orbits.map(map_orbit_ztest))
+    if method in ('hotelling', 'mahalanobis'):
+        # Normalize per orbit, pool across orbits, then Hotelling T² once.
+        # Step 1: For each orbit, z-score all images by that orbit's pre-war stats
+        def normalize_orbit_images(orbit):
+            s1 = make_orbit_s1(orbit)
+            pre = s1.filterDate(
+                war_start.advance(ee.Number(pre_interval).multiply(-1), "month"), war_start)
+            has_pre = pre.select('VV').count().reduceRegion(
+                ee.Reducer.max(), aoi, 1000).values().get(0)
+            pre_mean = pre.mean()
+            pre_sd = pre.reduce(ee.Reducer.stdDev()).rename(['VV', 'VH'])
+            # z-normalize all images (pre and post) in this orbit
+            normalized = s1.map(lambda img:
+                img.subtract(pre_mean).divide(pre_sd.max(ee.Image.constant(1e-10)))
+                .copyProperties(img, ['system:time_start'])
+            ).toList(500)
+            return ee.Algorithms.If(ee.Number(has_pre).gt(0), normalized, ee.List([]))
+
+        # Step 2: Pool normalized images from all orbits into one collection
+        # Add fully-masked sentinels so pre/post collections are never empty (avoids bandless images)
+        masked_sentinel = ee.Image.constant([0, 0]).rename(['VV', 'VH']).updateMask(0).toFloat()
+        pre_sentinel = masked_sentinel.set('system:time_start', war_start.advance(-1, 'day').millis())
+        post_sentinel = masked_sentinel.set('system:time_start', inference_start.advance(1, 'day').millis())
+        all_normalized = ee.ImageCollection(orbits.map(normalize_orbit_images).flatten()) \
+            .merge(ee.ImageCollection([pre_sentinel, post_sentinel]))
+        pre_norm = all_normalized.filterDate(
+            war_start.advance(ee.Number(pre_interval).multiply(-1), "month"), war_start)
+        post_norm = all_normalized.filterDate(
+            inference_start, inference_start.advance(post_interval, "month"))
+
+        # Step 3: Hotelling T² on pooled normalized data
+        pre_mean_raw = pre_norm.mean()
+        post_mean_raw = post_norm.mean()
+        if lee_mode == 'composite':
+            # Apply Lee filter to composites only (saves ~37% EECU)
+            _add_angle = lambda img: img.addBands(ee.Image.constant(0).rename('angle'))
+            pre_mean = lee_filter(_add_angle(pre_mean_raw)).select(['VV', 'VH'])
+            post_mean = lee_filter(_add_angle(post_mean_raw)).select(['VV', 'VH'])
+        else:
+            pre_mean = pre_mean_raw
+            post_mean = post_mean_raw
+        pre_n = pre_norm.select('VV').count()
+        post_n = post_norm.select('VV').count()
+
+        # Per-pixel variances on normalized data (always from unfiltered images)
+        pre_sd = pre_norm.reduce(ee.Reducer.stdDev())
+        post_sd = post_norm.reduce(ee.Reducer.stdDev())
+        pre_var_vv = pre_sd.select('VV_stdDev').pow(2)
+        pre_var_vh = pre_sd.select('VH_stdDev').pow(2)
+        post_var_vv = post_sd.select('VV_stdDev').pow(2)
+        post_var_vh = post_sd.select('VH_stdDev').pow(2)
+
+        # Per-pixel cross-covariance (from unfiltered means for consistency)
+        pre_cov = pre_norm.map(lambda img:
+            img.select('VV').subtract(pre_mean_raw.select('VV'))
+            .multiply(img.select('VH').subtract(pre_mean_raw.select('VH')))
+            .rename('cov')
+        ).mean().multiply(pre_n).divide(pre_n.subtract(1))
+
+        post_cov = post_norm.map(lambda img:
+            img.select('VV').subtract(post_mean_raw.select('VV'))
+            .multiply(img.select('VH').subtract(post_mean_raw.select('VH')))
+            .rename('cov')
+        ).mean().multiply(post_n).divide(post_n.subtract(1))
+
+        # Pooled covariance matrix (2x2)
+        denom_pool = pre_n.add(post_n).subtract(2)
+        s11 = pre_var_vv.multiply(pre_n.subtract(1)).add(post_var_vv.multiply(post_n.subtract(1))).divide(denom_pool)
+        s22 = pre_var_vh.multiply(pre_n.subtract(1)).add(post_var_vh.multiply(post_n.subtract(1))).divide(denom_pool)
+        s12 = pre_cov.multiply(pre_n.subtract(1)).add(post_cov.multiply(post_n.subtract(1))).divide(denom_pool)
+
+        det = s11.multiply(s22).subtract(s12.pow(2)).max(ee.Image.constant(1e-10))
+
+        d_vv = post_mean.select('VV').subtract(pre_mean.select('VV'))
+        d_vh = post_mean.select('VH').subtract(pre_mean.select('VH'))
+
+        quad_form = d_vv.pow(2).multiply(s22) \
+            .subtract(d_vv.multiply(d_vh).multiply(s12).multiply(2)) \
+            .add(d_vh.pow(2).multiply(s11)) \
+            .divide(det)
+        t2 = pre_n.multiply(post_n).divide(pre_n.add(post_n)).multiply(quad_form)
+
+        if method == 'mahalanobis':
+            # Effect size: sqrt(Mahalanobis distance) — n-invariant
+            max_change = quad_form.sqrt().rename('max_change')
+            # Exact F-based p-value for p=2 variables (closed-form F CDF)
+            n_total = pre_n.add(post_n)
+            p_value = ee.Image.constant(1).add(t2.divide(n_total.subtract(2))) \
+                .pow(n_total.subtract(3).multiply(-0.5)) \
+                .max(ee.Image.constant(1e-10)).rename('p_value')
+        else:
+            # Hotelling: sqrt(T²) as test statistic
+            max_change = t2.sqrt().rename('max_change')
+            p_value = t2.multiply(-0.5).exp().max(ee.Image.constant(1e-10)).rename('p_value')
+
+        valid_mask = pre_n.gte(3).And(post_n.gte(2))
+        max_change = max_change.updateMask(valid_mask)
+        p_value = p_value.updateMask(valid_mask)
+        n_pre = pre_n.rename('n_pre')
+        n_post = post_n.rename('n_post')
+
+        # Z-test on latest post-war image (data is already z-normalized per orbit)
+        latest_post = all_normalized.filterDate(
+            inference_start, inference_start.advance(post_interval, 'month')
+        ).sort('system:time_start', False).mosaic()
+        z_vv = latest_post.select('VV').abs()
+        z_vh = latest_post.select('VH').abs()
+        z_max = z_vv.max(z_vh).updateMask(valid_mask).rename('Z_statistic')
+        z_p = two_tailed_pvalue(z_max).updateMask(valid_mask).rename('Z_p_value')
+
     else:
-        orbit_images = ee.ImageCollection(orbits.map(map_orbit_ttest))
+        # Per-orbit test → combine across orbits
+        if method == 'ztest':
+            orbit_images = ee.ImageCollection(orbits.map(map_orbit_ztest))
+        else:
+            orbit_images = ee.ImageCollection(orbits.map(map_orbit_ttest))
 
-    if method == 'stouffer':
-        # Stouffer's weighted Z-score: weight each orbit by sqrt(df) where
-        # df = n_pre + n_post - 2. Combined Z = sum(w*t)/sqrt(sum(w²)) is
-        # standard normal under H0 — doesn't inflate with more orbits.
-        def add_stouffer_bands(img):
-            df = img.select('n_pre').add(img.select('n_post')).subtract(2)
-            w = df.sqrt()
-            return img.addBands(img.select('VV').multiply(w).rename('w_VV')) \
-                      .addBands(img.select('VH').multiply(w).rename('w_VH')) \
-                      .addBands(df.rename('w_sq'))
+        if method == 'stouffer':
+            # Stouffer's weighted Z-score: weight each orbit by sqrt(df).
+            # Combined Z = sum(w*t)/sqrt(sum(w²)) is standard normal under H0.
+            def add_stouffer_bands(img):
+                df = img.select('df_VV').max(img.select('df_VH'))
+                w = df.sqrt()
+                return img.addBands(img.select('VV').multiply(w).rename('w_VV')) \
+                          .addBands(img.select('VH').multiply(w).rename('w_VH')) \
+                          .addBands(df.rename('w_sq'))
 
-        orbit_images = orbit_images.map(add_stouffer_bands)
-        sum_w_sq = orbit_images.select('w_sq').sum()
-        z_vv = orbit_images.select('w_VV').sum().divide(sum_w_sq.sqrt()).rename('VV')
-        z_vh = orbit_images.select('w_VH').sum().divide(sum_w_sq.sqrt()).rename('VH')
+            orbit_images = orbit_images.map(add_stouffer_bands)
+            sum_w_sq = orbit_images.select('w_sq').sum()
+            z_vv = orbit_images.select('w_VV').sum().divide(sum_w_sq.sqrt()).rename('VV')
+            z_vh = orbit_images.select('w_VH').sum().divide(sum_w_sq.sqrt()).rename('VH')
 
-        max_change = z_vv.max(z_vh).rename('max_change')
-        # P-value from combined Z; ×2 for VV/VH max (Bonferroni for 2 tests)
-        p_value = two_tailed_pvalue(max_change).multiply(2) \
-            .min(ee.Image.constant(1)).rename('p_value')
-        n_pre = orbit_images.select('n_pre').sum()
-        n_post = orbit_images.select('n_post').sum()
+            max_change = z_vv.max(z_vh).rename('max_change')
+            # Independent VV/VH tests → Bonferroni correction ×2
+            p_value = two_tailed_pvalue(max_change).multiply(2) \
+                .min(ee.Image.constant(1)).rename('p_value')
+            n_pre = orbit_images.select('n_pre').sum()
+            n_post = orbit_images.select('n_post').sum()
 
-    elif method in ('max', 'ztest'):
-        # max t-value (or z-value) across orbits, min p-value, Bonferroni
-        t_max = orbit_images.select(['VV', 'VH']).max()
-        p_min = orbit_images.select(['VV_pvalue', 'VH_pvalue']).min()
-        n_pre = orbit_images.select('n_pre').max()
-        n_post = orbit_images.select('n_post').max()
-        image = t_max.addBands(p_min)
+        elif method in ('max', 'ztest'):
+            # max t-value (or z-value) across orbits, min p-value, Bonferroni
+            t_max = orbit_images.select(['VV', 'VH']).max()
+            p_min = orbit_images.select(['VV_pvalue', 'VH_pvalue']).min()
+            n_pre = orbit_images.select('n_pre').max()
+            n_post = orbit_images.select('n_post').max()
+            image = t_max.addBands(p_min)
 
-        max_change = image.select('VV').max(image.select('VH')).rename('max_change')
-        p_value = image.select('VV_pvalue').min(image.select('VH_pvalue')).rename('p_value')
-        n_orbits = orbits.size()
-        p_value = p_value.multiply(n_orbits).min(ee.Image.constant(1)).rename('p_value')
+            max_change = image.select('VV').max(image.select('VH')).rename('max_change')
+            p_value = image.select('VV_pvalue').min(image.select('VH_pvalue')).rename('p_value')
+            n_orbits = orbits.size()
+            p_value = p_value.multiply(n_orbits).min(ee.Image.constant(1)).rename('p_value')
 
-    else:
-        raise ValueError(f"method must be 'stouffer', 'max', or 'ztest', got '{method}'")
+        else:
+            raise ValueError(f"method must be 'stouffer', 'max', 'ztest', 'hotelling', or 'mahalanobis', got '{method}'")
 
     # Build a fully-masked empty image as fallback for areas with no S1 coverage
-    empty = ee.Image.constant([0, 0, 1, 0, 0]).rename(
-        ['T_statistic', 'damage', 'p_value', 'n_pre', 'n_post']
-    ).updateMask(ee.Image.constant(0)).toFloat()
+    empty_bands = ['T_statistic', 'damage', 'p_value', 'n_pre', 'n_post']
+    empty_vals = [0, 0, 1, 0, 0]
+    if method in ('hotelling', 'mahalanobis'):
+        empty_bands += ['Z_statistic', 'Z_p_value']
+        empty_vals += [0, 1]
+    empty = ee.Image.constant(empty_vals).rename(empty_bands) \
+        .updateMask(ee.Image.constant(0)).toFloat()
 
     # Constrain to areas with valid raw data before smoothing
     raw_data_mask = max_change.mask()
+    urban_mask = urban.gt(0.1)
 
-    # Spatial smoothing applies only to t-values
-    t_smooth = max_change.focalMedian(10, 'gaussian', 'meters')
-    if clip:
-        t_smooth = t_smooth.clip(aoi)
-    t_smooth = t_smooth.updateMask(urban.gt(0.1)).updateMask(raw_data_mask)
-    k50 = t_smooth.convolve(ee.Kernel.circle(50, 'meters', True)).rename('k50')
-    k100 = t_smooth.convolve(ee.Kernel.circle(100, 'meters', True)).rename('k100')
-    k150 = t_smooth.convolve(ee.Kernel.circle(150, 'meters', True)).rename('k150')
+    # Parse smoothing config
+    if smoothing == 'default':
+        smooth_cfg = dict(focal_radius=10, kernels=[50, 100, 150], weights=[0.25, 0.25, 0.25, 0.25])
+    elif smoothing == 'focal_only':
+        smooth_cfg = dict(focal_radius=10, kernels=[], weights=[1.0])
+    elif isinstance(smoothing, dict):
+        smooth_cfg = smoothing
+    else:
+        raise ValueError(f"smoothing must be 'default', 'focal_only', or a dict, got '{smoothing}'")
 
-    damage = t_smooth.gt(3.3).rename('damage')
-    T_statistic = (t_smooth.add(k50).add(k100).add(k150)).divide(4).rename('T_statistic')
+    # Urban mask ordering: before or after focal median
+    if mask_before_smooth:
+        max_change_input = max_change.updateMask(urban_mask).updateMask(raw_data_mask)
+        t_smooth = max_change_input.focalMedian(smooth_cfg['focal_radius'], 'gaussian', 'meters')
+        if clip:
+            t_smooth = t_smooth.clip(aoi)
+    else:
+        t_smooth = max_change.focalMedian(smooth_cfg['focal_radius'], 'gaussian', 'meters')
+        if clip:
+            t_smooth = t_smooth.clip(aoi)
+        t_smooth = t_smooth.updateMask(urban_mask).updateMask(raw_data_mask)
+
+    # Multi-scale convolutions
+    layers = [t_smooth]
+    for radius in smooth_cfg.get('kernels', []):
+        layers.append(t_smooth.convolve(ee.Kernel.circle(radius, 'meters', True)))
+
+    # Weighted average across scales
+    weights = smooth_cfg['weights']
+    T_statistic = ee.Image.constant(0).toFloat()
+    for layer, w in zip(layers, weights):
+        T_statistic = T_statistic.add(layer.multiply(w))
+    T_statistic = T_statistic.rename('T_statistic')
+
     # Re-apply raw data mask so T_statistic doesn't extend beyond where n_post is valid
     T_statistic = T_statistic.updateMask(raw_data_mask)
+    damage = T_statistic.gt(threshold).rename('damage')
 
     # Mask p-values with urban mask
     p_value = p_value.updateMask(urban.gt(0.1))
     if clip:
         p_value = p_value.clip(aoi)
 
-    image = T_statistic.addBands(damage).addBands(p_value).addBands(n_pre).addBands(n_post).toFloat()
+    image = T_statistic.addBands(damage).addBands(p_value).addBands(n_pre).addBands(n_post)
+    if method in ('hotelling', 'mahalanobis'):
+        image = image.addBands(z_max).addBands(z_p)
+    image = image.toFloat()
 
     # If no orbits had coverage, return the empty fallback
     image = ee.Image(ee.Algorithms.If(orbits.size().gt(0), image, empty))
@@ -324,6 +586,7 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
             folder=export_dir,
             fileFormat='CSV'
         )
+        task_grid.start()
 
     if viz:
         Map = geemap.Map()
@@ -332,7 +595,7 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
         Map.centerObject(aoi)
         return Map
 
-    if type(footprints) != type(None):
+    if footprints is not None:
         fc = ee.FeatureCollection(footprints).filterBounds(aoi)
         fp = image.reduceRegions(
             collection=fc,

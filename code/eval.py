@@ -220,10 +220,13 @@ kharkiv_missing = ee.Geometry.Polygon([[
 
 # ========================= Metrics =========================
 
-def run_evaluation(labels, scores, area):
+def run_evaluation(labels, scores, area, score_type='t'):
     """
     Compute area-weighted precision, recall, F1 (optimal PR-curve threshold),
-    and AUC-ROC matching the replication-branch methodology.
+    and AUC-ROC.
+
+    score_type: 't' for T_statistic (higher = more damage),
+                'p' for p_value (lower = more damage, scores are inverted internally)
 
     Returns: dict with precision, recall, f1, auc, threshold
     """
@@ -234,6 +237,10 @@ def run_evaluation(labels, scores, area):
     # Remove NaN rows
     valid = ~(np.isnan(labels) | np.isnan(scores) | np.isnan(area))
     labels, scores, area = labels[valid], scores[valid], area[valid]
+
+    if score_type == 'p':
+        # Invert p-values: lower p = more damage, so use -log10(p) as score
+        scores = -np.log10(np.clip(scores, 1e-10, 1.0))
 
     # AUC from ROC curve (area-weighted)
     fpr, tpr, _ = roc_curve(labels, scores, sample_weight=area)
@@ -260,10 +267,11 @@ def run_evaluation(labels, scores, area):
     )
 
 
+
 # ========================= Evaluation =========================
 
 def run_eval(name, pre_interval, post_interval, inference_start,
-             ground_truth, footprints, war_start, bounds, method='stouffer'):
+             ground_truth, footprints, war_start, bounds, method='stouffer', **kwargs):
     """Run PWTT and evaluate against ground truth damage annotations."""
 
     inference_date = (
@@ -280,6 +288,7 @@ def run_eval(name, pre_interval, post_interval, inference_start,
         pre_interval=pre_interval,
         post_interval=post_interval,
         method=method,
+        **kwargs,
     )
 
     # Ground truth points
@@ -313,37 +322,46 @@ def run_eval(name, pre_interval, post_interval, inference_start,
         scale=10, tileScale=8,
     )
 
-    # Filter to footprints that have valid T_statistic (non-null)
-    fp_sample = fp_sample.filter(ee.Filter.notNull(['T_statistic']))
+    # Filter to footprints that have valid T_statistic and p_value (non-null)
+    fp_sample = fp_sample.filter(ee.Filter.notNull(['T_statistic', 'p_value']))
 
-    # Select only needed properties to keep payload small
-    fp_sample = fp_sample.select(['class', 'T_statistic', 'area'])
+    # Select only needed properties and drop geometry to minimize payload
+    fp_sample = fp_sample.select(['class', 'T_statistic', 'p_value', 'area'], retainGeometry=False)
 
-    # Pull labels, scores, and area — paginate with toList to avoid timeout
-    labels, scores, areas = [], [], []
+    # Pull data — 1 getInfo call per page (not 4), parse features locally
+    labels, t_scores, p_scores, areas = [], [], [], []
     page_size = 5000
     total = fp_sample.size().getInfo()
     offset = 0
     while offset < total:
-        page = ee.FeatureCollection(fp_sample.toList(page_size, offset))
-        labels.extend(page.aggregate_array('class').getInfo())
-        scores.extend(page.aggregate_array('T_statistic').getInfo())
-        areas.extend(page.aggregate_array('area').getInfo())
+        page = fp_sample.toList(page_size, offset).getInfo()
+        for f in page:
+            p = f['properties']
+            labels.append(p['class'])
+            t_scores.append(p['T_statistic'])
+            p_scores.append(p['p_value'])
+            areas.append(p['area'])
         offset += page_size
         if offset < total:
-            print(f"    ... fetched {offset:,}/{total:,} footprints")
+            # Incremental metrics on data so far
+            inc_t = run_evaluation(labels, t_scores, areas, score_type='t')
+            print(f"    ... {offset:,}/{total:,}  AUC={inc_t['auc']:.3f}  F1={inc_t['f1']:.3f}  t*={inc_t['threshold']:.2f}")
 
-    metrics = run_evaluation(labels, scores, areas)
+    metrics_t = run_evaluation(labels, t_scores, areas, score_type='t')
+    metrics_p = run_evaluation(labels, p_scores, areas, score_type='p')
     n_pos = sum(1 for l in labels if l == 1)
     n_neg = len(labels) - n_pos
 
-    print(f"  {name:<18s} P={metrics['precision']:.3f}  R={metrics['recall']:.3f}  "
-          f"F1={metrics['f1']:.3f}  AUC={metrics['auc']:.3f}  "
-          f"t*={metrics['threshold']:.2f}  "
-          f"(n={len(labels):,}, pos={n_pos:,}, neg={n_neg:,})")
+    print(f"  {name:<18s} [T] P={metrics_t['precision']:.3f}  R={metrics_t['recall']:.3f}  "
+          f"F1={metrics_t['f1']:.3f}  AUC={metrics_t['auc']:.3f}  t*={metrics_t['threshold']:.2f}")
+    print(f"  {'':<18s} [p] P={metrics_p['precision']:.3f}  R={metrics_p['recall']:.3f}  "
+          f"F1={metrics_p['f1']:.3f}  AUC={metrics_p['auc']:.3f}  -log10(p)*={metrics_p['threshold']:.2f}")
+    print(f"  {'':<18s} (n={len(labels):,}, pos={n_pos:,}, neg={n_neg:,})")
 
     return dict(name=name, method=method, n=len(labels),
-                n_pos=n_pos, n_neg=n_neg, **metrics)
+                n_pos=n_pos, n_neg=n_neg,
+                **{f't_{k}': v for k, v in metrics_t.items()},
+                **{f'p_{k}': v for k, v in metrics_p.items()})
 
 
 # ========================= City Configs =========================
@@ -486,49 +504,65 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='Evaluate PWTT against ground truth')
-    parser.add_argument('--method', choices=['stouffer', 'max', 'ztest', 'both', 'all'], default='both',
+    parser.add_argument('--method', choices=['stouffer', 'max', 'ztest', 'hotelling', 'mahalanobis', 'both', 'all'], default='both',
                         help='Orbit combination method (default: both)')
     parser.add_argument('--cities', nargs='*', default=None,
                         help='Specific cities to run (default: all)')
+    parser.add_argument('--ttest-type', choices=['welch', 'pooled'], default='pooled',
+                        help='T-test type: welch (unequal variance) or pooled (default: welch)')
     args = parser.parse_args()
+
+    # Build kwargs for detect_damage
+    detect_kwargs = dict(
+        ttest_type=args.ttest_type,
+    )
 
     if args.method == 'both':
         methods = ['stouffer', 'max']
     elif args.method == 'all':
-        methods = ['stouffer', 'max', 'ztest']
+        methods = ['stouffer', 'max', 'ztest', 'hotelling', 'mahalanobis']
     else:
         methods = [args.method]
 
     for method in methods:
         print(f"\n{'='*60}")
-        print(f"  Running evaluations with method={method}")
+        print(f"  method={method}  ttest_type={args.ttest_type}")
         print(f"{'='*60}\n")
 
         results = []
         for city in CITIES:
-            if args.cities and city['name'] not in args.cities:
+            if args.cities and 'all' not in args.cities and city['name'] not in args.cities:
                 continue
-            res = run_eval(
-                name=city['name'],
-                pre_interval=12,
-                post_interval=POST_INTERVAL,
-                inference_start=city['inference_start'],
-                ground_truth=city['ground_truth'],
-                footprints=city['footprints'],
-                war_start=city['war_start'],
-                bounds=city['bounds'],
-                method=method,
-            )
-            results.append(res)
+            try:
+                res = run_eval(
+                    name=city['name'],
+                    pre_interval=12,
+                    post_interval=POST_INTERVAL,
+                    inference_start=city['inference_start'],
+                    ground_truth=city['ground_truth'],
+                    footprints=city['footprints'],
+                    war_start=city['war_start'],
+                    bounds=city['bounds'],
+                    method=method,
+                    **detect_kwargs,
+                )
+                results.append(res)
+            except Exception as e:
+                print(f"  {city['name']:<18s} FAILED: {e}")
+                continue
 
         # Summary table
         if results:
             df = pd.DataFrame(results)
             weights = df['n'].values
-            avg = {col: np.average(df[col], weights=weights)
-                   for col in ['precision', 'recall', 'f1', 'auc']}
-            print(f"\n  {'Weighted avg':<18s} P={avg['precision']:.3f}  R={avg['recall']:.3f}  "
-                  f"F1={avg['f1']:.3f}  AUC={avg['auc']:.3f}  "
-                  f"(n={df['n'].sum():,})")
+            avg_t = {col: np.average(df[f't_{col}'], weights=weights)
+                     for col in ['precision', 'recall', 'f1', 'auc']}
+            avg_p = {col: np.average(df[f'p_{col}'], weights=weights)
+                     for col in ['precision', 'recall', 'f1', 'auc']}
+            print(f"\n  {'Weighted avg':<18s} [T] P={avg_t['precision']:.3f}  R={avg_t['recall']:.3f}  "
+                  f"F1={avg_t['f1']:.3f}  AUC={avg_t['auc']:.3f}")
+            print(f"  {'':<18s} [p] P={avg_p['precision']:.3f}  R={avg_p['recall']:.3f}  "
+                  f"F1={avg_p['f1']:.3f}  AUC={avg_p['auc']:.3f}")
+            print(f"  {'':<18s} (n={df['n'].sum():,})")
 
     print(f"\nDone.")
