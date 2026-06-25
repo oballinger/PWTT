@@ -271,7 +271,8 @@ def run_evaluation(labels, scores, area, score_type='t'):
 # ========================= Evaluation =========================
 
 def run_eval(name, pre_interval, post_interval, inference_start,
-             ground_truth, footprints, war_start, bounds, method='stouffer', **kwargs):
+             ground_truth, footprints, war_start, bounds, method='stouffer',
+             quiet=False, **kwargs):
     """Run PWTT and evaluate against ground truth damage annotations."""
 
     inference_date = (
@@ -342,7 +343,7 @@ def run_eval(name, pre_interval, post_interval, inference_start,
             p_scores.append(p['p_value'])
             areas.append(p['area'])
         offset += page_size
-        if offset < total:
+        if offset < total and not quiet:
             # Incremental metrics on data so far
             inc_t = run_evaluation(labels, t_scores, areas, score_type='t')
             print(f"    ... {offset:,}/{total:,}  AUC={inc_t['auc']:.3f}  F1={inc_t['f1']:.3f}  t*={inc_t['threshold']:.2f}")
@@ -502,54 +503,121 @@ CITIES = [
 
 if __name__ == '__main__':
     import argparse
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     parser = argparse.ArgumentParser(description='Evaluate PWTT against ground truth')
-    parser.add_argument('--method', choices=['stouffer', 'max', 'ztest', 'hotelling', 'mahalanobis', 'both', 'all'], default='both',
-                        help='Orbit combination method (default: both)')
+    parser.add_argument('--method', choices=['stouffer', 'max', 'ztest', 'hotelling', 'mahalanobis', 'cusum', 'both', 'all', 'compare'], default='both',
+                        help="Orbit combination method (default: both). 'compare' = stouffer+mahalanobis+cusum.")
     parser.add_argument('--cities', nargs='*', default=None,
                         help='Specific cities to run (default: all)')
     parser.add_argument('--ttest-type', choices=['welch', 'pooled'], default='pooled',
                         help='T-test type: welch (unequal variance) or pooled (default: welch)')
+    parser.add_argument('--sensor', choices=['s1', 's2', 'combined'], default='s1',
+                        help="Sensor: s1 (default), s2, or combined (S1+S2 pooled, mahalanobis/hotelling only)")
+    parser.add_argument('--workers', type=int, default=4,
+                        help='Parallel workers across cities (default: 4, use 1 for sequential)')
+    parser.add_argument('--chunks', type=int, default=1,
+                        help='Split bounds of --chunk-cities into N×N tiles, evaluate each separately (default: 1)')
+    parser.add_argument('--chunk-cities', nargs='*', default=['Gaza'],
+                        help='Cities whose bounds should be tiled when --chunks > 1 (default: Gaza)')
     args = parser.parse_args()
 
     # Build kwargs for detect_damage
     detect_kwargs = dict(
         ttest_type=args.ttest_type,
+        sensor=args.sensor,
     )
 
     if args.method == 'both':
         methods = ['stouffer', 'max']
     elif args.method == 'all':
-        methods = ['stouffer', 'max', 'ztest', 'hotelling', 'mahalanobis']
+        methods = ['stouffer', 'max', 'ztest', 'hotelling', 'mahalanobis', 'cusum']
+    elif args.method == 'compare':
+        methods = ['cusum', 'mahalanobis']
     else:
         methods = [args.method]
+
+    # ---- bounds chunking (e.g. Gaza is too big for one EE call) ----
+    def split_bbox_grid(geom, n):
+        """Split geom's bounding box into ~n tiles (closest n_rows×n_cols), intersected with geom."""
+        import math
+        cols = max(1, int(round(math.sqrt(n))))
+        rows = max(1, int(math.ceil(n / cols)))
+        coords = ee.List(ee.Geometry(geom).bounds().coordinates().get(0))
+        sw = ee.List(coords.get(0))
+        ne = ee.List(coords.get(2))
+        x0 = ee.Number(sw.get(0)); y0 = ee.Number(sw.get(1))
+        x1 = ee.Number(ne.get(0)); y1 = ee.Number(ne.get(1))
+        dx = x1.subtract(x0).divide(cols)
+        dy = y1.subtract(y0).divide(rows)
+        tiles = []
+        for r in range(rows):
+            for c in range(cols):
+                rect = ee.Geometry.Rectangle(
+                    [x0.add(dx.multiply(c)), y0.add(dy.multiply(r)),
+                     x0.add(dx.multiply(c + 1)), y0.add(dy.multiply(r + 1))],
+                    None, False)
+                tiles.append(rect.intersection(geom, 10))
+        return tiles, rows, cols
+
+    def expand_chunks(cities):
+        if args.chunks <= 1:
+            return cities
+        out = []
+        for c in cities:
+            if c['name'] in (args.chunk_cities or []):
+                tiles, _rows, cols = split_bbox_grid(c['bounds'], args.chunks)
+                for i, t in enumerate(tiles):
+                    sub = dict(c)
+                    sub['bounds'] = t
+                    sub['name'] = f"{c['name']}_r{i // cols}c{i % cols}"
+                    out.append(sub)
+            else:
+                out.append(c)
+        return out
 
     for method in methods:
         print(f"\n{'='*60}")
         print(f"  method={method}  ttest_type={args.ttest_type}")
         print(f"{'='*60}\n")
 
+        selected = [
+            c for c in CITIES
+            if not (args.cities and 'all' not in args.cities and c['name'] not in args.cities)
+        ]
+        selected = expand_chunks(selected)
+
+        def _run_one(city, _method=method):
+            return run_eval(
+                name=city['name'],
+                pre_interval=12,
+                post_interval=POST_INTERVAL,
+                inference_start=city['inference_start'],
+                ground_truth=city['ground_truth'],
+                footprints=city['footprints'],
+                war_start=city['war_start'],
+                bounds=city['bounds'],
+                method=_method,
+                quiet=(args.workers > 1),
+                **detect_kwargs,
+            )
+
         results = []
-        for city in CITIES:
-            if args.cities and 'all' not in args.cities and city['name'] not in args.cities:
-                continue
-            try:
-                res = run_eval(
-                    name=city['name'],
-                    pre_interval=12,
-                    post_interval=POST_INTERVAL,
-                    inference_start=city['inference_start'],
-                    ground_truth=city['ground_truth'],
-                    footprints=city['footprints'],
-                    war_start=city['war_start'],
-                    bounds=city['bounds'],
-                    method=method,
-                    **detect_kwargs,
-                )
-                results.append(res)
-            except Exception as e:
-                print(f"  {city['name']:<18s} FAILED: {e}")
-                continue
+        if args.workers <= 1:
+            for city in selected:
+                try:
+                    results.append(_run_one(city))
+                except Exception as e:
+                    print(f"  {city['name']:<18s} FAILED: {e}")
+        else:
+            with ThreadPoolExecutor(max_workers=args.workers) as ex:
+                futures = {ex.submit(_run_one, c): c for c in selected}
+                for fut in as_completed(futures):
+                    city = futures[fut]
+                    try:
+                        results.append(fut.result())
+                    except Exception as e:
+                        print(f"  {city['name']:<18s} FAILED: {e}")
 
         # Summary table
         if results:

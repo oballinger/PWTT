@@ -296,7 +296,82 @@ def hotelling_t2(s1, inference_start, war_start, pre_interval, post_interval, tt
         .addBands(df_vv).addBands(df_vh)
 
 
-def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False, export_dir='PWTT_Export', export_name=None, export_scale=10, grid_scale=500, export_grid=False, clip=True, method='stouffer', threshold=3.3, ttest_type='welch', smoothing='default', mask_before_smooth=True, lee_mode='per_image'):
+S2_BANDS = ['B2', 'B3', 'B4', 'B8', 'B11']
+
+
+def _build_s2_collection(aoi, start, end):
+    """Sentinel-2 SR with s2cloudless + cloud-shadow projection + SCL fallback.
+
+    Returns an ImageCollection of cloud-masked, scaled (0–1) reflectance images
+    with bands [B2, B3, B4, B8, B11] and the MGRS_TILE property carried through.
+    Mirrors the official GEE s2cloudless tutorial.
+    """
+    start = ee.Date(start)
+    end = ee.Date(end)
+
+    s2 = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+          .filterBounds(aoi)
+          .filterDate(start, end)
+          .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 60)))
+
+    s2c = (ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY')
+           .filterBounds(aoi)
+           .filterDate(start, end))
+
+    joined = ee.ImageCollection(
+        ee.Join.saveFirst('cloud_prob').apply(
+            primary=s2,
+            secondary=s2c,
+            condition=ee.Filter.equals(leftField='system:index', rightField='system:index'),
+        )
+    )
+
+    CLD_PRB_THRESH = 50
+    NIR_DRK_THRESH = 0.15
+    CLD_PRJ_DIST = 1  # km
+
+    def mask_one(img):
+        cloud_prob = ee.Image(img.get('cloud_prob')).select('probability')
+        is_cloud = cloud_prob.gt(CLD_PRB_THRESH).rename('clouds')
+
+        # Solar azimuth → projection vector
+        scaled = img.select('B8').divide(10000)
+        dark_pixels = scaled.lt(NIR_DRK_THRESH).multiply(
+            img.select('SCL').neq(6)  # exclude water
+        ).rename('dark_pixels')
+
+        shadow_azimuth = ee.Number(90).subtract(
+            ee.Number(img.get('MEAN_SOLAR_AZIMUTH_ANGLE'))
+        )
+        cld_proj = (is_cloud.directionalDistanceTransform(shadow_azimuth, CLD_PRJ_DIST * 10)
+                    .reproject(crs=img.select(0).projection(), scale=100)
+                    .select('distance').mask().rename('cloud_transform'))
+        shadows = cld_proj.multiply(dark_pixels).rename('shadows')
+
+        # SCL belt-and-braces: 3=shadow, 8/9=clouds, 10=cirrus, 11=snow
+        scl = img.select('SCL')
+        scl_mask = (scl.eq(3).Or(scl.eq(8)).Or(scl.eq(9))
+                    .Or(scl.eq(10)).Or(scl.eq(11)))
+
+        cloud_or_shadow = is_cloud.Or(shadows).Or(scl_mask)
+
+        # Buffer mask by ~50 m
+        buffered = (cloud_or_shadow.focalMin(2).focalMax(10)
+                    .reproject(crs=img.select(0).projection(), scale=20)
+                    .rename('cloud_mask'))
+
+        # Scale to [0,1] reflectance, then add 0 to drop the inferred range so
+        # the band type is plain Float (matches the masked sentinel later).
+        scaled_bands = (img.select(S2_BANDS).divide(10000)
+                        .add(ee.Image.constant(0)).toFloat()
+                        .rename(S2_BANDS))
+        return (scaled_bands.updateMask(buffered.Not())
+                .copyProperties(img, ['system:time_start', 'MGRS_TILE']))
+
+    return joined.map(mask_one)
+
+
+def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, export=False, export_dir='PWTT_Export', export_name=None, export_scale=10, grid_scale=500, export_grid=False, clip=True, method='stouffer', threshold=3.3, ttest_type='welch', smoothing='default', mask_before_smooth=True, lee_mode='per_image', sensor='s1'):
     import warnings
 
     if (export or export_grid) and export_name is None:
@@ -312,161 +387,336 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
                 "The post-war period will use pre-war imagery."
             )
 
+    if sensor not in ('s1', 's2', 'combined'):
+        raise ValueError(f"sensor must be 's1', 's2', or 'combined', got '{sensor}'")
+    if sensor in ('s2', 'combined') and method not in ('mahalanobis', 'hotelling'):
+        raise ValueError(
+            f"sensor='{sensor}' only supports method in ('mahalanobis', 'hotelling'), got '{method}'"
+        )
+
     inference_start = ee.Date(inference_start)
     war_start = ee.Date(war_start)
 
-    orbits = ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
-        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")) \
-        .filter(ee.Filter.eq("instrumentMode", "IW")) \
-        .filterBounds(aoi) \
-        .filterDate(inference_start, inference_start.advance(post_interval, 'months')) \
-        .aggregate_array('relativeOrbitNumber_start') \
-        .distinct()
-
-    def make_orbit_s1(orbit):
-        s1 = ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
+    def _setup_s1():
+        bl = ['VV', 'VH']
+        orbs = ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
             .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")) \
             .filter(ee.Filter.eq("instrumentMode", "IW")) \
-            .filter(ee.Filter.eq("relativeOrbitNumber_start", orbit)) \
-            .filterBounds(aoi)
-        if lee_mode == 'per_image':
-            s1 = s1.map(lee_filter)
-        return s1.select(['VV', 'VH']).map(lambda image: image.log())
+            .filterBounds(aoi) \
+            .filterDate(inference_start, inference_start.advance(post_interval, 'months')) \
+            .aggregate_array('relativeOrbitNumber_start') \
+            .distinct()
 
-    # Fallback image for orbits with no coverage — all bands present but fully masked
-    empty_orbit = ee.Image.constant([0, 0, 0, 0, 0, 0, 0, 0]).rename(
-        ['VV', 'VH', 'VV_pvalue', 'VH_pvalue', 'n_pre', 'n_post', 'df_VV', 'df_VH']
-    ).updateMask(ee.Image.constant(0)).toFloat()
+        def make_s1(orbit):
+            s1 = ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
+                .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")) \
+                .filter(ee.Filter.eq("instrumentMode", "IW")) \
+                .filter(ee.Filter.eq("relativeOrbitNumber_start", orbit)) \
+                .filterBounds(aoi)
+            if lee_mode == 'per_image':
+                s1 = s1.map(lee_filter)
+            return s1.select(['VV', 'VH']).map(lambda image: image.log())
 
-    def map_orbit_ttest(orbit):
-        s1 = make_orbit_s1(orbit)
-        result = ttest(s1, inference_start, war_start, pre_interval, post_interval, ttest_type=ttest_type)
-        return ee.Image(ee.Algorithms.If(result.bandNames().size().gt(0), result, empty_orbit))
+        return bl, orbs, make_s1
 
-    def map_orbit_ztest(orbit):
-        s1 = make_orbit_s1(orbit)
-        result = ztest(s1, inference_start, war_start, pre_interval)
-        return ee.Image(ee.Algorithms.If(result.bandNames().size().gt(0), result, empty_orbit))
+    def _setup_s2():
+        bl = list(S2_BANDS)
+        window_start = war_start.advance(ee.Number(pre_interval).multiply(-1), 'month')
+        window_end = inference_start.advance(post_interval, 'month')
+        s2_full = _build_s2_collection(aoi, window_start, window_end)
+        grps = s2_full.aggregate_array('MGRS_TILE').distinct()
+
+        def make_s2(tile):
+            return s2_full.filter(ee.Filter.eq('MGRS_TILE', tile))
+
+        return bl, grps, make_s2
+
+    if sensor == 's1':
+        band_list, groups, make_group_collection = _setup_s1()
+    elif sensor == 's2':
+        band_list, groups, make_group_collection = _setup_s2()
+    else:  # combined
+        s1_band_list, s1_groups, s1_make = _setup_s1()
+        s2_band_list, s2_groups, s2_make = _setup_s2()
+        # Used downstream for the empty-fallback orbit-size check
+        groups = s1_groups
+
+    if sensor == 's1':
+        # Fallback image for orbits with no coverage — all bands present but fully masked
+        empty_orbit = ee.Image.constant([0, 0, 0, 0, 0, 0, 0, 0]).rename(
+            ['VV', 'VH', 'VV_pvalue', 'VH_pvalue', 'n_pre', 'n_post', 'df_VV', 'df_VH']
+        ).updateMask(ee.Image.constant(0)).toFloat()
+
+        def map_orbit_ttest(orbit):
+            s1 = make_orbit_s1(orbit)
+            result = ttest(s1, inference_start, war_start, pre_interval, post_interval, ttest_type=ttest_type)
+            return ee.Image(ee.Algorithms.If(result.bandNames().size().gt(0), result, empty_orbit))
+
+        def map_orbit_ztest(orbit):
+            s1 = make_orbit_s1(orbit)
+            result = ztest(s1, inference_start, war_start, pre_interval)
+            return ee.Image(ee.Algorithms.If(result.bandNames().size().gt(0), result, empty_orbit))
 
     urban = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1').filterDate(
         war_start.advance(-1 * pre_interval, 'months'), war_start).select('built').mean()
 
-    if method in ('hotelling', 'mahalanobis'):
-        # Normalize per orbit, pool across orbits, then Hotelling T² once.
-        # Step 1: For each orbit, z-score all images by that orbit's pre-war stats
-        def normalize_orbit_images(orbit):
-            s1 = make_orbit_s1(orbit)
-            pre = s1.filterDate(
+    if method in ('hotelling', 'mahalanobis', 'cusum'):
+
+        def _compute_for_sensor(bl, grps, make_group):
+            """Run per-group z-normalization + pooled Mahalanobis for one sensor.
+
+            Returns a dict with t2, quad_form, pre_n, post_n, valid_mask, p,
+            and z_max (latest-image absolute-z statistic, unmasked).
+            """
+            p = len(bl)
+
+            def normalize_group_images(group_id):
+                coll = make_group(group_id)
+                pre = coll.filterDate(
+                    war_start.advance(ee.Number(pre_interval).multiply(-1), "month"), war_start)
+                has_pre = pre.select(bl[0]).count().reduceRegion(
+                    ee.Reducer.max(), aoi, 1000).values().get(0)
+                pre_mean = pre.mean()
+                pre_sd = pre.reduce(ee.Reducer.stdDev()).rename(bl)
+                normalized = coll.map(lambda img:
+                    img.select(bl).subtract(pre_mean).divide(pre_sd.max(ee.Image.constant(1e-10)))
+                    .copyProperties(img, ['system:time_start'])
+                ).toList(500)
+                return ee.Algorithms.If(ee.Number(has_pre).gt(0), normalized, ee.List([]))
+
+            masked_sentinel = ee.Image.constant([0] * p).rename(bl).updateMask(0).toFloat()
+            pre_sentinel = masked_sentinel.set('system:time_start', war_start.advance(-1, 'day').millis())
+            post_sentinel = masked_sentinel.set('system:time_start', inference_start.advance(1, 'day').millis())
+            all_norm = ee.ImageCollection(grps.map(normalize_group_images).flatten()) \
+                .merge(ee.ImageCollection([pre_sentinel, post_sentinel]))
+            pre_norm = all_norm.filterDate(
                 war_start.advance(ee.Number(pre_interval).multiply(-1), "month"), war_start)
-            has_pre = pre.select('VV').count().reduceRegion(
-                ee.Reducer.max(), aoi, 1000).values().get(0)
-            pre_mean = pre.mean()
-            pre_sd = pre.reduce(ee.Reducer.stdDev()).rename(['VV', 'VH'])
-            # z-normalize all images (pre and post) in this orbit
-            normalized = s1.map(lambda img:
-                img.subtract(pre_mean).divide(pre_sd.max(ee.Image.constant(1e-10)))
-                .copyProperties(img, ['system:time_start'])
-            ).toList(500)
-            return ee.Algorithms.If(ee.Number(has_pre).gt(0), normalized, ee.List([]))
+            post_norm = all_norm.filterDate(
+                inference_start, inference_start.advance(post_interval, "month"))
 
-        # Step 2: Pool normalized images from all orbits into one collection
-        # Add fully-masked sentinels so pre/post collections are never empty (avoids bandless images)
-        masked_sentinel = ee.Image.constant([0, 0]).rename(['VV', 'VH']).updateMask(0).toFloat()
-        pre_sentinel = masked_sentinel.set('system:time_start', war_start.advance(-1, 'day').millis())
-        post_sentinel = masked_sentinel.set('system:time_start', inference_start.advance(1, 'day').millis())
-        all_normalized = ee.ImageCollection(orbits.map(normalize_orbit_images).flatten()) \
-            .merge(ee.ImageCollection([pre_sentinel, post_sentinel]))
-        pre_norm = all_normalized.filterDate(
-            war_start.advance(ee.Number(pre_interval).multiply(-1), "month"), war_start)
-        post_norm = all_normalized.filterDate(
-            inference_start, inference_start.advance(post_interval, "month"))
+            pre_mean_raw = pre_norm.mean()
+            post_mean_raw = post_norm.mean()
+            if sensor == 's1' and lee_mode == 'composite' and bl == ['VV', 'VH']:
+                _add_angle = lambda img: img.addBands(ee.Image.constant(0).rename('angle'))
+                pre_mean = lee_filter(_add_angle(pre_mean_raw)).select(bl)
+                post_mean = lee_filter(_add_angle(post_mean_raw)).select(bl)
+            else:
+                pre_mean = pre_mean_raw
+                post_mean = post_mean_raw
+            pre_n_l = pre_norm.select(bl[0]).count()
+            post_n_l = post_norm.select(bl[0]).count()
 
-        # Step 3: Hotelling T² on pooled normalized data
-        pre_mean_raw = pre_norm.mean()
-        post_mean_raw = post_norm.mean()
-        if lee_mode == 'composite':
-            # Apply Lee filter to composites only (saves ~37% EECU)
-            _add_angle = lambda img: img.addBands(ee.Image.constant(0).rename('angle'))
-            pre_mean = lee_filter(_add_angle(pre_mean_raw)).select(['VV', 'VH'])
-            post_mean = lee_filter(_add_angle(post_mean_raw)).select(['VV', 'VH'])
-        else:
-            pre_mean = pre_mean_raw
-            post_mean = post_mean_raw
-        pre_n = pre_norm.select('VV').count()
-        post_n = post_norm.select('VV').count()
+            denom_pool = pre_n_l.add(post_n_l).subtract(2)
 
-        # Per-pixel variances on normalized data (always from unfiltered images)
-        pre_sd = pre_norm.reduce(ee.Reducer.stdDev())
-        post_sd = post_norm.reduce(ee.Reducer.stdDev())
-        pre_var_vv = pre_sd.select('VV_stdDev').pow(2)
-        pre_var_vh = pre_sd.select('VH_stdDev').pow(2)
-        post_var_vv = post_sd.select('VV_stdDev').pow(2)
-        post_var_vh = post_sd.select('VH_stdDev').pow(2)
+            def cross_cov(coll, mean_img, n, bi, bj):
+                return coll.map(lambda img:
+                    img.select(bi).subtract(mean_img.select(bi))
+                    .multiply(img.select(bj).subtract(mean_img.select(bj)))
+                    .rename('cov')
+                ).mean().multiply(n).divide(n.subtract(1))
 
-        # Per-pixel cross-covariance (from unfiltered means for consistency)
-        pre_cov = pre_norm.map(lambda img:
-            img.select('VV').subtract(pre_mean_raw.select('VV'))
-            .multiply(img.select('VH').subtract(pre_mean_raw.select('VH')))
-            .rename('cov')
-        ).mean().multiply(pre_n).divide(pre_n.subtract(1))
+            cov_band_imgs = []
+            for i in range(p):
+                for j in range(p):
+                    bi = bl[i]
+                    bj = bl[j]
+                    pre_ij = cross_cov(pre_norm, pre_mean_raw, pre_n_l, bi, bj)
+                    post_ij = cross_cov(post_norm, post_mean_raw, post_n_l, bi, bj)
+                    s_ij = (pre_ij.multiply(pre_n_l.subtract(1))
+                            .add(post_ij.multiply(post_n_l.subtract(1)))
+                            .divide(denom_pool))
+                    cov_band_imgs.append(s_ij.rename(f's_{i}_{j}'))
 
-        post_cov = post_norm.map(lambda img:
-            img.select('VV').subtract(post_mean_raw.select('VV'))
-            .multiply(img.select('VH').subtract(post_mean_raw.select('VH')))
-            .rename('cov')
-        ).mean().multiply(post_n).divide(post_n.subtract(1))
+            cov_flat = ee.Image.cat(cov_band_imgs).toArray()
+            cov_array = cov_flat.arrayReshape(ee.Image(ee.Array([p, p])), 2)
+            ridge = ee.Image(ee.Array([[1e-10 if i == j else 0.0 for j in range(p)]
+                                        for i in range(p)]))
+            s_inv = cov_array.add(ridge).matrixInverse()
 
-        # Pooled covariance matrix (2x2)
-        denom_pool = pre_n.add(post_n).subtract(2)
-        s11 = pre_var_vv.multiply(pre_n.subtract(1)).add(post_var_vv.multiply(post_n.subtract(1))).divide(denom_pool)
-        s22 = pre_var_vh.multiply(pre_n.subtract(1)).add(post_var_vh.multiply(post_n.subtract(1))).divide(denom_pool)
-        s12 = pre_cov.multiply(pre_n.subtract(1)).add(post_cov.multiply(post_n.subtract(1))).divide(denom_pool)
+            d_bands = [post_mean.select(b).subtract(pre_mean.select(b)).rename(f'd_{b}')
+                       for b in bl]
+            d_flat = ee.Image.cat(d_bands).toArray()
+            d_col = d_flat.arrayReshape(ee.Image(ee.Array([p, 1])), 2)
+            qf_arr = d_col.arrayTranspose().matrixMultiply(s_inv).matrixMultiply(d_col)
+            quad_form_l = qf_arr.arrayProject([0]).arrayFlatten([['quad']])
+            t2_l = pre_n_l.multiply(post_n_l).divide(pre_n_l.add(post_n_l)).multiply(quad_form_l)
 
-        det = s11.multiply(s22).subtract(s12.pow(2)).max(ee.Image.constant(1e-10))
+            valid_mask_l = pre_n_l.gte(3).And(post_n_l.gte(2))
 
-        d_vv = post_mean.select('VV').subtract(pre_mean.select('VV'))
-        d_vh = post_mean.select('VH').subtract(pre_mean.select('VH'))
+            # Latest-image z-test
+            latest_post = all_norm.filterDate(
+                inference_start, inference_start.advance(post_interval, 'month')
+            ).sort('system:time_start', False).mosaic()
+            z_per_band = [latest_post.select(b).abs() for b in bl]
+            z_max_l = z_per_band[0]
+            for zi in z_per_band[1:]:
+                z_max_l = z_max_l.max(zi)
 
-        quad_form = d_vv.pow(2).multiply(s22) \
-            .subtract(d_vv.multiply(d_vh).multiply(s12).multiply(2)) \
-            .add(d_vh.pow(2).multiply(s11)) \
-            .divide(det)
-        t2 = pre_n.multiply(post_n).divide(pre_n.add(post_n)).multiply(quad_form)
+            return dict(
+                t2=t2_l, quad_form=quad_form_l, pre_n=pre_n_l, post_n=post_n_l,
+                valid_mask=valid_mask_l, p=p, z_max=z_max_l, all_norm=all_norm,
+                make_group=make_group, bl=bl,
+            )
 
-        if method == 'mahalanobis':
+        if sensor in ('s1', 's2'):
+            r = _compute_for_sensor(band_list, groups, make_group_collection)
+            t2 = r['t2']
+            quad_form = r['quad_form']
+            p = r['p']
+            pre_n = r['pre_n']
+            post_n = r['post_n']
+            valid_mask = r['valid_mask']
+            z_max = r['z_max'].updateMask(valid_mask).rename('Z_statistic')
+        else:  # combined: independence assumption → block-diagonal cov → T²_combined = T²_S1 + T²_S2
+            if method == 'cusum':
+                raise ValueError("sensor='combined' does not support method='cusum'")
+            r1 = _compute_for_sensor(s1_band_list, s1_groups, s1_make)
+            r2 = _compute_for_sensor(s2_band_list, s2_groups, s2_make)
+            t2 = r1['t2'].unmask(0).add(r2['t2'].unmask(0))
+            # quad_form analogue: use t2 directly for max_change in mahalanobis branch
+            quad_form = r1['quad_form'].unmask(0).add(r2['quad_form'].unmask(0))
+            p = r1['p'] + r2['p']
+            pre_n = r1['pre_n'].unmask(0).add(r2['pre_n'].unmask(0))
+            post_n = r1['post_n'].unmask(0).add(r2['post_n'].unmask(0))
+            # Need both sensors to have valid coverage in a pixel
+            valid_mask = r1['valid_mask'].unmask(0).And(r2['valid_mask'].unmask(0))
+            z_max = r1['z_max'].unmask(0).max(r2['z_max'].unmask(0)) \
+                .updateMask(valid_mask).rename('Z_statistic')
+
+        if method == 'cusum':
+            # Page's CUSUM on per-pixel fused magnitude m_t = sqrt(sum_b x_b²)
+            # over post-war z-normalized images. Output: max S_t per pixel.
+            def normalize_group_post(group_id):
+                coll = make_group_collection(group_id)
+                pre = coll.filterDate(
+                    war_start.advance(ee.Number(pre_interval).multiply(-1), "month"), war_start)
+                has_pre = pre.select(band_list[0]).count().reduceRegion(
+                    ee.Reducer.max(), aoi, 1000).values().get(0)
+                pre_mean_g = pre.mean()
+                pre_sd_g = pre.reduce(ee.Reducer.stdDev()).rename(band_list)
+                post = coll.filterDate(inference_start, inference_start.advance(post_interval, "month"))
+                normalized = post.map(lambda img:
+                    img.select(band_list).subtract(pre_mean_g).divide(pre_sd_g.max(ee.Image.constant(1e-10)))
+                    .copyProperties(img, ['system:time_start'])
+                ).toList(500)
+                return ee.Algorithms.If(ee.Number(has_pre).gt(0), normalized, ee.List([]))
+
+            post_only = ee.ImageCollection(groups.map(normalize_group_post).flatten())
+            post_sorted = post_only.sort('system:time_start')
+
+            def to_magnitude(img):
+                sq = ee.Image(img).select(band_list).pow(2)
+                # sum across bands → 1-band magnitude
+                total = ee.Image.constant(0)
+                for b in band_list:
+                    total = total.add(sq.select(b))
+                return (total.sqrt().rename('m')
+                        .copyProperties(img, ['system:time_start']))
+
+            mag_ic = post_sorted.map(to_magnitude)
+            first_mag = ee.Image(mag_ic.first())
+            zero_img = first_mag.multiply(0).rename('m')
+            cusum_k = ee.Image.constant(2.0)
+            initial = ee.List([zero_img, zero_img])
+
+            def step(img, prev):
+                prev = ee.List(prev)
+                s_prev = ee.Image(prev.get(0))
+                max_s = ee.Image(prev.get(1))
+                s_new = ee.Image(img).subtract(cusum_k).add(s_prev).max(ee.Image.constant(0))
+                return ee.List([s_new, s_new.max(max_s)])
+
+            final = ee.List(mag_ic.iterate(step, initial))
+            max_change = ee.Image(final.get(1)).rename('max_change')
+            p_value = max_change.multiply(-0.5).exp().max(ee.Image.constant(1e-10)).rename('p_value')
+        elif method == 'mahalanobis':
             # Effect size: sqrt(Mahalanobis distance) — n-invariant
             max_change = quad_form.sqrt().rename('max_change')
-            # Exact F-based p-value for p=2 variables (closed-form F CDF)
-            n_total = pre_n.add(post_n)
-            p_value = ee.Image.constant(1).add(t2.divide(n_total.subtract(2))) \
-                .pow(n_total.subtract(3).multiply(-0.5)) \
-                .max(ee.Image.constant(1e-10)).rename('p_value')
+            # Chi-squared(p) survival approximation (valid for large n).
+            p_value = t2.multiply(-0.5).exp().max(ee.Image.constant(1e-10)).rename('p_value')
         else:
             # Hotelling: sqrt(T²) as test statistic
             max_change = t2.sqrt().rename('max_change')
             p_value = t2.multiply(-0.5).exp().max(ee.Image.constant(1e-10)).rename('p_value')
 
-        valid_mask = pre_n.gte(3).And(post_n.gte(2))
         max_change = max_change.updateMask(valid_mask)
         p_value = p_value.updateMask(valid_mask)
         n_pre = pre_n.rename('n_pre')
         n_post = post_n.rename('n_post')
-
-        # Z-test on latest post-war image (data is already z-normalized per orbit)
-        latest_post = all_normalized.filterDate(
-            inference_start, inference_start.advance(post_interval, 'month')
-        ).sort('system:time_start', False).mosaic()
-        z_vv = latest_post.select('VV').abs()
-        z_vh = latest_post.select('VH').abs()
-        z_max = z_vv.max(z_vh).updateMask(valid_mask).rename('Z_statistic')
         z_p = two_tailed_pvalue(z_max).updateMask(valid_mask).rename('Z_p_value')
 
     else:
         # Per-orbit test → combine across orbits
         if method == 'ztest':
-            orbit_images = ee.ImageCollection(orbits.map(map_orbit_ztest))
+            orbit_images = ee.ImageCollection(groups.map(map_orbit_ztest))
+        elif method == 'mahalanobis_max':
+            # JS app-style: per-orbit Mahalanobis on raw log SAR (no z-norm),
+            # always with per-image Lee filter, MAX across orbits.
+            def map_orbit_mahalanobis_raw(orbit):
+                s1 = ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT") \
+                    .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")) \
+                    .filter(ee.Filter.eq("instrumentMode", "IW")) \
+                    .filter(ee.Filter.eq("relativeOrbitNumber_start", orbit)) \
+                    .filterBounds(aoi) \
+                    .map(lee_filter) \
+                    .select(['VV', 'VH']) \
+                    .map(lambda image: image.log())
+                pre = s1.filterDate(
+                    war_start.advance(ee.Number(pre_interval).multiply(-1), 'month'), war_start)
+                post = s1.filterDate(
+                    inference_start, inference_start.advance(post_interval, 'month'))
+
+                pre_n_o = pre.select('VV').count()
+                post_n_o = post.select('VV').count()
+                pre_mean_o = pre.mean()
+                post_mean_o = post.mean()
+
+                pre_sd_o = pre.reduce(ee.Reducer.stdDev())
+                post_sd_o = post.reduce(ee.Reducer.stdDev())
+                pre_var_vv = pre_sd_o.select('VV_stdDev').pow(2)
+                pre_var_vh = pre_sd_o.select('VH_stdDev').pow(2)
+                post_var_vv = post_sd_o.select('VV_stdDev').pow(2)
+                post_var_vh = post_sd_o.select('VH_stdDev').pow(2)
+
+                pre_cov_o = pre.map(lambda img:
+                    img.select('VV').subtract(pre_mean_o.select('VV'))
+                       .multiply(img.select('VH').subtract(pre_mean_o.select('VH')))
+                       .rename('cov')
+                ).mean().multiply(pre_n_o).divide(pre_n_o.subtract(1))
+                post_cov_o = post.map(lambda img:
+                    img.select('VV').subtract(post_mean_o.select('VV'))
+                       .multiply(img.select('VH').subtract(post_mean_o.select('VH')))
+                       .rename('cov')
+                ).mean().multiply(post_n_o).divide(post_n_o.subtract(1))
+
+                denom = pre_n_o.add(post_n_o).subtract(2)
+                s11 = pre_var_vv.multiply(pre_n_o.subtract(1)) \
+                    .add(post_var_vv.multiply(post_n_o.subtract(1))).divide(denom)
+                s22 = pre_var_vh.multiply(pre_n_o.subtract(1)) \
+                    .add(post_var_vh.multiply(post_n_o.subtract(1))).divide(denom)
+                s12 = pre_cov_o.multiply(pre_n_o.subtract(1)) \
+                    .add(post_cov_o.multiply(post_n_o.subtract(1))).divide(denom)
+                det = s11.multiply(s22).subtract(s12.pow(2)).max(ee.Image.constant(1e-10))
+
+                d_vv = post_mean_o.select('VV').subtract(pre_mean_o.select('VV'))
+                d_vh = post_mean_o.select('VH').subtract(pre_mean_o.select('VH'))
+                quad = d_vv.pow(2).multiply(s22) \
+                    .subtract(d_vv.multiply(d_vh).multiply(s12).multiply(2)) \
+                    .add(d_vh.pow(2).multiply(s11)) \
+                    .divide(det)
+                mahal = quad.sqrt().rename('mahal')
+
+                # Hotelling T² → chi-squared(p) approx for p-value
+                t2 = pre_n_o.multiply(post_n_o).divide(pre_n_o.add(post_n_o)).multiply(quad)
+                p_v = t2.multiply(-0.5).exp().max(ee.Image.constant(1e-10)).rename('p_value')
+
+                return mahal.addBands(p_v) \
+                    .addBands(pre_n_o.toFloat().rename('n_pre')) \
+                    .addBands(post_n_o.toFloat().rename('n_post'))
+
+            orbit_images = ee.ImageCollection(groups.map(map_orbit_mahalanobis_raw))
         else:
-            orbit_images = ee.ImageCollection(orbits.map(map_orbit_ttest))
+            orbit_images = ee.ImageCollection(groups.map(map_orbit_ttest))
 
         if method == 'stouffer':
             # Stouffer's weighted Z-score: weight each orbit by sqrt(df).
@@ -500,16 +750,28 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
 
             max_change = image.select('VV').max(image.select('VH')).rename('max_change')
             p_value = image.select('VV_pvalue').min(image.select('VH_pvalue')).rename('p_value')
-            n_orbits = orbits.size()
+            n_orbits = groups.size()
             p_value = p_value.multiply(n_orbits).min(ee.Image.constant(1)).rename('p_value')
 
+        elif method == 'mahalanobis_max':
+            max_change = orbit_images.select('mahal').max().rename('max_change')
+            p_value = orbit_images.select('p_value').min().rename('p_value')
+            n_pre = orbit_images.select('n_pre').max()
+            n_post = orbit_images.select('n_post').max()
+            valid_mask_l = n_pre.gte(3).And(n_post.gte(2))
+            max_change = max_change.updateMask(valid_mask_l)
+            p_value = p_value.updateMask(valid_mask_l)
+            # Z_statistic placeholders (zero-valued) for output schema parity with mahalanobis
+            z_max = ee.Image.constant(0).toFloat().rename('Z_statistic').updateMask(valid_mask_l)
+            z_p = ee.Image.constant(1).toFloat().rename('Z_p_value').updateMask(valid_mask_l)
+
         else:
-            raise ValueError(f"method must be 'stouffer', 'max', 'ztest', 'hotelling', or 'mahalanobis', got '{method}'")
+            raise ValueError(f"method must be 'stouffer', 'max', 'ztest', 'hotelling', 'mahalanobis', or 'mahalanobis_max', got '{method}'")
 
     # Build a fully-masked empty image as fallback for areas with no S1 coverage
     empty_bands = ['T_statistic', 'damage', 'p_value', 'n_pre', 'n_post']
     empty_vals = [0, 0, 1, 0, 0]
-    if method in ('hotelling', 'mahalanobis'):
+    if method in ('hotelling', 'mahalanobis', 'cusum', 'mahalanobis_max'):
         empty_bands += ['Z_statistic', 'Z_p_value']
         empty_vals += [0, 1]
     empty = ee.Image.constant(empty_vals).rename(empty_bands) \
@@ -520,6 +782,9 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
     urban_mask = urban.gt(0.1)
 
     # Parse smoothing config
+    if method == 'mahalanobis_max' and smoothing == 'default':
+        # JS-app default: 20m gaussian focal median, no multi-scale convolutions
+        smoothing = dict(focal_radius=20, kernels=[], weights=[1.0])
     if smoothing == 'default':
         smooth_cfg = dict(focal_radius=10, kernels=[50, 100, 150], weights=[0.25, 0.25, 0.25, 0.25])
     elif smoothing == 'focal_only':
@@ -563,12 +828,12 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
         p_value = p_value.clip(aoi)
 
     image = T_statistic.addBands(damage).addBands(p_value).addBands(n_pre).addBands(n_post)
-    if method in ('hotelling', 'mahalanobis'):
+    if method in ('hotelling', 'mahalanobis', 'cusum', 'mahalanobis_max'):
         image = image.addBands(z_max).addBands(z_p)
     image = image.toFloat()
 
-    # If no orbits had coverage, return the empty fallback
-    image = ee.Image(ee.Algorithms.If(orbits.size().gt(0), image, empty))
+    # If no groups had coverage, return the empty fallback
+    image = ee.Image(ee.Algorithms.If(groups.size().gt(0), image, empty))
     if clip:
         image = image.clip(aoi)
 
